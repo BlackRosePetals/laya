@@ -189,6 +189,25 @@ try:
 except SchemaError as exc:
     check("reject/non-array enum names the field and type", str(exc),
           "properties.x: 'enum' must be an array of values, got str")
+# The same guard the `allOf` branch already applies to its wrapper, `anyOf`/`oneOf` did not: a
+# non-array union leaked `TypeError: 'int' object is not iterable` (and a `bool`, which subclasses
+# `int`, leaked `TypeError: 'bool' object is not iterable`) instead of the path-naming SchemaError
+# the module raises for every other malformed property. Both must now reject as an unsupported schema.
+for nonarray in (3, 1.5, True, False):
+    check_raises("reject/non-array union %s %r" % ("anyOf", nonarray), SchemaError,
+                 _bad({"type": "object", "properties": {"x": {"anyOf": nonarray}}}))
+    check_raises("reject/non-array union %s %r" % ("oneOf", nonarray), SchemaError,
+                 _bad({"type": "object", "properties": {"x": {"oneOf": nonarray}}}))
+try:
+    questions_from_json_schema({"type": "object", "properties": {"x": {"anyOf": 3}}})
+except SchemaError as exc:
+    check("reject/non-array union names the field and shows the schema", str(exc),
+          "properties.x: unsupported schema {'anyOf': 3}")
+# Positive control: a real one-non-null-branch union still unwraps (the guard is not over-strict).
+check("accept/optional anyOf still maps",
+      questions_from_json_schema(
+          {"type": "object", "properties": {"x": {"anyOf": [{"type": "boolean"}, {"type": "null"}]}}}
+      )["x"]["type"], "noul")
 check_raises("reject/non-object root", SchemaError, _bad({"type": "array"}))
 check_raises("reject/empty properties", SchemaError, _bad({"type": "object", "properties": {}}))
 

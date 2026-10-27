@@ -25,7 +25,8 @@ function(laya_target_flags target)
   target_compile_options(${target} PRIVATE ${LAYA_FP_FLAGS} ${LAYA_WARN_FLAGS})
 endfunction()
 
-add_library(laya src/version.cpp src/sha256.cpp src/unicodedata.cpp src/pyjson.cpp src/pyvalue.cpp src/lang.cpp)
+add_library(laya src/version.cpp src/sha256.cpp src/unicodedata.cpp src/pyjson.cpp src/pyvalue.cpp src/lang.cpp
+  src/tokenizer.cpp)
 target_include_directories(laya PUBLIC include)
 laya_target_flags(laya)
 
@@ -44,7 +45,8 @@ if(LAYA_BUILD_TESTS)
   FetchContent_MakeAvailable(googletest)
 
   enable_testing()
-  add_executable(laya_tests tests/version_test.cpp tests/foundation_test.cpp tests/lang_test.cpp tests/hardening_test.cpp)
+  add_executable(laya_tests tests/version_test.cpp tests/foundation_test.cpp tests/lang_test.cpp tests/hardening_test.cpp
+  tests/tokenizer_test.cpp)
   target_link_libraries(laya_tests PRIVATE laya GTest::gtest_main)
   laya_target_flags(laya_tests)
 

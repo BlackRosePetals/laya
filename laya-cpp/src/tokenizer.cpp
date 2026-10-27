@@ -1280,23 +1280,41 @@ class Bpe {
         return;
       }
     }
-    std::vector<Symbol> symbols;
-    symbols.reserve(piece.size());
-    for (size_t i = 0; i < piece.size();) {
-      auto d = ud::DecodeRune(std::string_view(piece).substr(i));
-      int32_t id;
-      if (d.rune < kSmallRunes && d.rune != ud::kReplacement) {
-        id = small_[d.rune];
-      } else {
-        auto it = vocab_->find(piece.substr(i, d.width));
-        id = it == vocab_->end() ? -1 : it->second;
-      }
-      symbols.push_back(Symbol{int32_t(i), int32_t(i + d.width), id});
-      i += d.width;
-    }
+    std::vector<Symbol> symbols = Initial(piece);
     if (symbols.size() >= kHeapMinSymbols) MergeWithHeap(symbols);
     else MergeByRescan(symbols);
     Emit(piece, symbols, out);
+  }
+
+  std::vector<Symbol> Initial(const std::string& piece) const {
+    std::vector<Symbol> symbols;
+  symbols.reserve(piece.size());
+  for (size_t i = 0; i < piece.size();) {
+    auto d = ud::DecodeRune(std::string_view(piece).substr(i));
+    int32_t id;
+    if (d.rune < kSmallRunes && d.rune != ud::kReplacement) {
+      id = small_[d.rune];
+    } else {
+      auto it = vocab_->find(piece.substr(i, d.width));
+      id = it == vocab_->end() ? -1 : it->second;
+    }
+    symbols.push_back(Symbol{int32_t(i), int32_t(i + d.width), id});
+    i += d.width;
+  }
+    return symbols;
+  }
+
+  // The two merge strategies must give one answer; the test seam compares them on a piece.
+  bool StrategiesAgree(const std::string& piece) const {
+    std::vector<Symbol> a = Initial(piece), b = a;
+    if (a.empty()) return true;
+    MergeByRescan(a);
+    MergeWithHeap(b);
+    if (a.size() != b.size()) return false;
+    for (size_t i = 0; i < a.size(); i++) {
+      if (a[i].start != b[i].start || a[i].end != b[i].end || a[i].id != b[i].id) return false;
+    }
+    return true;
   }
 
   // Both strategies are public for the test that they agree.
@@ -1721,6 +1739,17 @@ std::optional<int32_t> Tokenizer::Sep() const { return Role(*impl_, "sep_token")
 std::optional<int32_t> Tokenizer::Mask() const { return Role(*impl_, "mask_token"); }
 std::optional<int32_t> Tokenizer::Pad() const { return Role(*impl_, "pad_token"); }
 std::string Tokenizer::MaskToken() const { return impl_->mask_token; }
+
+size_t Tokenizer::CountMergeDisagreements(std::string_view text, size_t* pieces_checked) const {
+  size_t bad = 0;
+  std::vector<std::string> pieces;
+  impl_->pre->Split(impl_->normalizer(ud::ToValid(text)), pieces);
+  for (const auto& p : pieces) {
+    if (!impl_->bpe->StrategiesAgree(p)) bad++;
+    if (pieces_checked != nullptr) (*pieces_checked)++;
+  }
+  return bad;
+}
 
 std::string Tokenizer::NormalizeForTest(std::string_view text) const { return impl_->normalizer(ud::ToValid(text)); }
 std::vector<std::string> Tokenizer::PreTokenizeForTest(std::string_view normalized) const {

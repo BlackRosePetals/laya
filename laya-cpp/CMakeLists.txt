@@ -53,6 +53,9 @@ if(LAYA_BUILD_TESTS)
   add_executable(laya_cli tests/tools/laya_cli.cpp)
   target_link_libraries(laya_cli PRIVATE laya)
   laya_target_flags(laya_cli)
+  add_executable(laya_c2_cli tests/tools/laya_c2_cli.cpp)
+  target_link_libraries(laya_c2_cli PRIVATE laya)
+  laya_target_flags(laya_c2_cli)
 
   include(GoogleTest)
   # PRE_TEST: the parametrized rows are counted from the goldens, which exist at test time.

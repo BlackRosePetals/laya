@@ -60,6 +60,8 @@ class Tokenizer {
   std::string MaskToken() const;  // "" when none is configured
 
   // Test seams: the stages of Encode, so a stage can be compared with the reference on its own.
+  // Pieces of text whose rescan and heap merges differ (must be 0); counts the pieces compared.
+  size_t CountMergeDisagreements(std::string_view text, size_t* pieces_checked) const;
   std::string NormalizeForTest(std::string_view text) const;
   std::vector<std::string> PreTokenizeForTest(std::string_view normalized) const;
 

@@ -1,5 +1,6 @@
 // laya::tokenizer against the `tokenizers` crate (through the Python-recorded goldens) and against
 // hand-built tokenizers. Ported from laya-go/tokenizer's tests.
+#include <algorithm>
 #include <cstdlib>
 #include <fstream>
 #include <mutex>
@@ -529,6 +530,7 @@ TEST(TokenizerAdded, LongestLstripRstripSingleWordNormalized) {
   auto inside = tok.Encode("swords word.");
   ASSERT_GE(inside.size(), 3u);
   EXPECT_EQ(inside[inside.size() - 2], 303) << "a single_word token inside a word is not matched but a free one is";
+  EXPECT_EQ(std::count(inside.begin(), inside.end(), 303), 1) << "swords holds the word but not as a word";
   EXPECT_EQ(tok.Encode("\xC3\xA9" "clair"), (V{304}));
   EXPECT_EQ(tok.Encode("a\xC2\xA7" "b!"), (V{97, 305, 98, 306}));
   EXPECT_EQ(tok.Encode("<S"), (V{60, 83})) << "a prefix of a token is not the token";
@@ -633,4 +635,66 @@ TEST(TokenizerPre, SequenceAndCornerCases) {
     ASSERT_TRUE(got.ok());
     EXPECT_EQ(Join(got.value()), Join(c.want)) << c.in;
   }
+}
+
+// Short pieces merge by rescanning and long ones with a heap; both must give one answer on real
+// text, including pieces long enough for the heap.
+TEST_P(Shipped, HeapAndRescanMergeAgree) {
+  std::string name = GetParam();
+  LAYA_GOLDEN_LIST(side, "go_extra.json", "encode_fuzz", name.c_str());
+  LAYA_CHECKPOINT(tok, name);
+  size_t checked = 0, bad = 0;
+  for (const Value& t : side->Find("texts")->items()) {
+    bad += tok->CountMergeDisagreements(t.as_string(), &checked);
+    std::string longer;  // a long piece: the heap path is taken from 32 symbols
+    for (char c : t.as_string()) {
+      if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) longer += c;
+    }
+    while (!longer.empty() && longer.size() < 200) longer += longer;
+    bad += tok->CountMergeDisagreements(longer, &checked);
+  }
+  EXPECT_EQ(bad, 0u);
+  EXPECT_GE(checked, 1000u);
+}
+
+TEST(TokenizerBpe, DuplicateMergeKeepsTheLowestRank) {
+  // "a b" is listed at rank 0 and again at rank 2, after "b c": the first listing decides, so abc -> ab, c.
+  Tokenizer tok = MustParse(
+      R"({"model":{"type":"BPE","vocab":{"a":0,"b":1,"c":2,"ab":3,"bc":4,"<unk>":5},"merges":["a b","b c","a b"],"unk_token":"<unk>"}})");
+  EXPECT_EQ(tok.Encode("abc"), (std::vector<int32_t>{3, 2}));
+}
+
+TEST(TokenizerBpe, ByteFallbackNeedsEveryByteAndResetsFusedUnknowns) {
+  const std::string head = R"({"model":{"type":"BPE","vocab":{"a":0,"<unk>":1,"<0xC3>":2,"<0xA9>":3},"merges":[],"unk_token":"<unk>","byte_fallback":true)";
+  using V = std::vector<int32_t>;
+  Tokenizer ok = MustParse(head + "}}");
+  EXPECT_EQ(ok.Encode("\xC3\xA9"), (V{2, 3})) << "every byte of the character resolves";
+  EXPECT_EQ(ok.Encode("\xC3\x80"), (V{1})) << "<0x80> is missing, so the whole character is unknown, not half bytes";
+  Tokenizer fused = MustParse(head + ",\"fuse_unk\":true}}");
+  EXPECT_EQ(fused.Encode("z\xC3\xA9z"), (V{1, 2, 3, 1})) << "bytes between two unknowns end the fused run";
+  EXPECT_EQ(fused.Encode("zzz"), (V{1}));
+}
+
+TEST(TokenizerRefusals, SequenceRunsInOrder) {
+  auto r = tk::RunNormalizerSpec(
+      R"({"type":"Sequence","normalizers":[{"type":"Prepend","prepend":"a"},{"type":"Replace","pattern":{"String":"a"},"content":"b"}]})", "a");
+  ASSERT_TRUE(r.ok());
+  EXPECT_EQ(r.value(), "bb");
+  auto s = tk::RunNormalizerSpec(
+      R"({"type":"Sequence","normalizers":[{"type":"Replace","pattern":{"String":"a"},"content":"b"},{"type":"Prepend","prepend":"a"}]})", "a");
+  ASSERT_TRUE(s.ok());
+  EXPECT_EQ(s.value(), "ab");
+}
+
+TEST(TokenizerAdded, RstripAbsorbsAllWhiteSpace) {
+  Tokenizer tok = MustParse(ByteLevelSpec(",\"added_tokens\":[{\"content\":\"[M]\",\"id\":302,\"special\":true,\"rstrip\":true}]"));
+  EXPECT_EQ(tok.Encode("[M]  \t b"), (std::vector<int32_t>{302, 98}));
+}
+
+// Canonical ordering must run before composition: a + dot above (230) + dot below (220) is a-dot-below
+// then dot above (values recorded from the crate).
+TEST(TokenizerNormalize, MarksAreReorderedBeforeTheyCompose) {
+  EXPECT_EQ(tk::Normalize("a\xCC\x87\xCC\xA3", Form::NFC), "\xE1\xBA\xA1\xCC\x87");
+  EXPECT_EQ(tk::Normalize("a\xCC\x87\xCC\xA3", Form::NFKC), "\xE1\xBA\xA1\xCC\x87");
+  EXPECT_EQ(tk::Normalize("a\xCC\x87\xCC\xA3", Form::NFD), "a\xCC\xA3\xCC\x87");
 }

@@ -608,13 +608,19 @@ TEST(TokenizerRegex, SubsetBehaviour) {
   EXPECT_EQ(run("[^a-c]", "abxcy"), "ab_c_");
   EXPECT_EQ(run("^a", "aa"), "_a");
   EXPECT_EQ(run("a$", "aa"), "a_");
+  EXPECT_EQ(run("^a", "a\na"), "_\n_") << "^ and $ are line anchors, as in the crate's Oniguruma";
+  EXPECT_EQ(run("a$", "a\na"), "_\n_");
+  EXPECT_EQ(run("(a?)?b", "ab"), "_");
+  auto nullable = tk::RunNormalizerSpec(R"({"type":"Replace","pattern":{"Regex":"(a*)+b"},"content":"x"})", "b");
+  ASSERT_FALSE(nullable.ok());
+  EXPECT_TRUE(tk::IsUnsupported(nullable.error())) << "repeating a group that can match nothing";
   EXPECT_EQ(run("a.c", "abc a\\nc"), "_ a\\nc");
   EXPECT_EQ(run("x{2,3}", "xxxxxxx"), "__x");
   EXPECT_EQ(run("(?i)HeLLo", "Hello HELLO hello"), "_ _ _");
   EXPECT_EQ(run("é+", "ééa"), "_a");
   EXPECT_EQ(run("(a|ab)(c|bcd)", "abcd"), "_") << "leftmost-first: a then bcd";
-  // The failed-state memo keeps nested repeats linear.
-  EXPECT_EQ(run("(a*)*b", std::string(5000, 'a')), std::string(5000, 'a'));
+  // The failed-state memo keeps repeats linear.
+  EXPECT_EQ(run("(a|aa)+b", std::string(5000, 'a')), std::string(5000, 'a'));
 }
 
 TEST(TokenizerPre, SequenceAndCornerCases) {

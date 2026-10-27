@@ -14,6 +14,7 @@
 namespace {
 std::string FromHex(const std::string& h) {
   std::string out;
+  if (h == "-") return out;  // "-" stands for the empty string, so fields never vanish from the line
   for (size_t i = 0; i + 1 < h.size(); i += 2) out.push_back(char(std::stoi(h.substr(i, 2), nullptr, 16)));
   return out;
 }

@@ -349,7 +349,7 @@ class Regex {
       at_++;
       // split(start of the left branches, next), the left branch jumps over the right.
       prog_.insert(prog_.begin() + start, Inst{kSplit, 0, 0, 0});
-      Shift(start + 1, 1);
+      Shift(start, 1);
       int j = Emit(kJmp);
       jumps.push_back(j);
       prog_[size_t(start)].x = start + 1;
@@ -362,7 +362,7 @@ class Regex {
   // Inserting an instruction at `from` moves everything after it, so targets at or past `from`
   // that were emitted before the insertion move by `by`.
   void Shift(int from, int by) {
-    for (size_t i = size_t(from); i < prog_.size(); i++) {
+    for (size_t i = size_t(from) + 1; i < prog_.size(); i++) {  // [from] is the inserted instruction
       Inst& in = prog_[i];
       if (in.op == kSplit || in.op == kJmp) {
         if (in.x >= from) in.x += by;
@@ -391,6 +391,11 @@ class Regex {
       } else break;
       bool lazy = More() && Peek() == '?';
       if (lazy) at_++;
+      // Oniguruma (the crate's engine) ends a repeat whose body matched nothing; a backtracker
+      // that remembers failed states would end it differently, so such a repeat is refused.
+      if (!(lo == 0 && hi == 1) && Nullable(start, end)) {
+        Unsupported("a Replace regex repeats a group that can match the empty string, whose repeat semantics differ between engines");
+      }
       std::vector<Inst> body(prog_.begin() + start, prog_.begin() + end);
       for (Inst& in : body) {
         if (in.op == kSplit || in.op == kJmp) {
@@ -433,6 +438,24 @@ class Regex {
       }
       end = int(prog_.size());
     }
+  }
+
+  // Can the instructions [start, end) reach `end` without consuming a character (anchors pass)?
+  bool Nullable(int start, int end) const {
+    std::vector<char> seen(size_t(end - start) + 1, 0);
+    std::vector<int> todo{start};
+    while (!todo.empty()) {
+      int pc = todo.back();
+      todo.pop_back();
+      if (pc == end) return true;
+      if (pc < start || pc > end || seen[size_t(pc - start)]) continue;
+      seen[size_t(pc - start)] = 1;
+      const Inst& in = prog_[size_t(pc)];
+      if (in.op == kJmp) todo.push_back(in.x);
+      else if (in.op == kSplit) { todo.push_back(in.x); todo.push_back(in.y); }
+      else if (in.op == kBol || in.op == kEol) todo.push_back(pc + 1);
+    }
+    return false;
   }
 
   bool Counts(int* lo, int* hi) {  // at '{'; false when it is not a repeat count (then a literal)
@@ -587,8 +610,8 @@ class Regex {
             pc = in.x;
             continue;
           }
-          if (in.op == kBol) { if (pos != 0) break; pc++; continue; }
-          if (in.op == kEol) { if (pos != text.size()) break; pc++; continue; }
+          if (in.op == kBol) { if (pos != 0 && text[pos - 1] != '\n') break; pc++; continue; }
+          if (in.op == kEol) { if (pos != text.size() && text[pos] != '\n') break; pc++; continue; }
           if (pos >= text.size()) break;
           auto d = ud::DecodeRune(std::string_view(text).substr(pos));
           bool ok;

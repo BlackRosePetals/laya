@@ -308,7 +308,9 @@ TEST_P(Shipped, DecodeMatchesPythonWholeAndSliced) {
       std::vector<int32_t> part(ids.begin() + long(start), ids.begin() + long(end));
       EXPECT_EQ(tok->Decode(part, true), s.Find("decoded")->as_string()) << "slice " << start;
     }
-    if (c.Find("slices")->size() == 0) EXPECT_TRUE(text.empty() && ids.empty());
+    if (c.Find("slices")->size() == 0) {
+      EXPECT_TRUE(text.empty() && ids.empty());
+    }
     const Value& w = *c.Find("with_specials");
     auto with = Ints(*w.Find("ids"));
     EXPECT_EQ(tok->Decode(with, true), w.Find("skipping_specials")->as_string());
@@ -480,6 +482,7 @@ TEST(TokenizerLoader, Refuses) {
       {"a vocabulary giving one id to two tokens", Replace(good, "\"ab\":256", "\"ab\":0"), false},
       {"no vocabulary", "{\"model\":{\"type\":\"BPE\",\"merges\":[]}}", false},
       {"not JSON", "{", false},
+      {"a Strip decoder start beyond int range", ByteLevelSpec(",\"decoder\":{\"type\":\"Strip\",\"content\":\" \",\"start\":1e30,\"stop\":0}"), false},
       {"a lossy non-byte-level tokenizer", "{\"model\":{\"type\":\"BPE\",\"vocab\":{\"a\":0},\"merges\":[]}}", true},
   };
   for (const auto& c : cases) {

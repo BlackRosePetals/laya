@@ -659,7 +659,9 @@ int Int(const Value& n, const char* key, int def) {
   const Value* v = Member(n, key);
   if (v == nullptr) return def;
   if (v->kind() == Value::Kind::Int && v->as_int() >= -1000000000 && v->as_int() <= 1000000000) return int(v->as_int());
-  if (v->kind() == Value::Kind::Float && v->as_float() == double(int(v->as_float()))) return int(v->as_float());
+  if (v->kind() == Value::Kind::Float && v->as_float() >= -1e9 && v->as_float() <= 1e9 && v->as_float() == double(int(v->as_float()))) {
+    return int(v->as_float());
+  }
   Refuse(std::string("\"") + key + "\" must be an integer");
 }
 const Value& Object(const Value& n, const char* key) {

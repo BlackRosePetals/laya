@@ -45,6 +45,7 @@ env:
   MIN_TESTS: "213"
   GOLDENS: ${{ github.workspace }}/.cpp-goldens
   LAYA_GOLDENS: ${{ github.workspace }}/.cpp-goldens
+  LAYA_CHECKPOINTS: ${{ github.workspace }}/laya-java/.work/checkpoints   # the tokenizer tests need both shipped checkpoints
   LAYA_REQUIRE_GOLDENS: "1"   # a missing golden is a failure, never a skip
 
 jobs:
@@ -92,7 +93,7 @@ jobs:
           LAYA_FIXTURE_CHECKPOINTS: ${{ github.workspace }}/laya-java/.work/checkpoints
           PYTHONPATH: ${{ github.workspace }}
         run: |
-          python laya-java/scripts/gen_fixtures.py --strict --out "$GOLDENS" --only lang_tables.json --only lang_detect.json --only python_json.json
+          python laya-java/scripts/gen_fixtures.py --strict --out "$GOLDENS" --only lang_tables.json --only lang_detect.json --only python_json.json --only tokenizer_ids.json --only decode_text.json
           python laya-go/scripts/gen_go_fixtures.py --out "$GOLDENS"
       - name: Compiled C++ tables match CPython
         env:

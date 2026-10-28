@@ -108,7 +108,9 @@ TEST_P(SequenceRow, MatchesBuildSequence) {
   EXPECT_EQ(seq.value().stats.options_distinct, stats.Find("options_distinct")->as_int()) << label;
   const Value* tpo = stats.Find("tokens_per_option");
   EXPECT_EQ(seq.value().stats.tokens_per_option.has_value(), !tpo->is_null()) << label;
-  if (!tpo->is_null() && seq.value().stats.tokens_per_option) EXPECT_EQ(*seq.value().stats.tokens_per_option, tpo->as_int()) << label;
+  if (!tpo->is_null() && seq.value().stats.tokens_per_option) {
+    EXPECT_EQ(*seq.value().stats.tokens_per_option, tpo->as_int()) << label;
+  }
   const Value& tr = *rec.Find("truncation");
   sq::Truncation want{tr.Find("state_tokens")->as_int(), tr.Find("state_tokens_used")->as_int(),
                       tr.Find("state_tokens_dropped")->as_int(), tr.Find("truncated")->as_bool()};
@@ -288,7 +290,9 @@ TEST(BatchCap, MatchesPythonGrid) {
     const Value* want = rec.Find("cap");
     sq::Cap got = sq::BatchCap(n, w, cfg, batch);
     EXPECT_EQ(got.ok, !want->is_null()) << "row " << i;
-    if (!want->is_null()) EXPECT_EQ(got.cap, want->as_int()) << "row " << i;
+    if (!want->is_null()) {
+      EXPECT_EQ(got.cap, want->as_int()) << "row " << i;
+    }
     if (!want->is_null() && batch <= 0) capped++;
   }
   EXPECT_GT(capped, 0);

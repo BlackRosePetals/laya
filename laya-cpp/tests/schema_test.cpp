@@ -28,7 +28,9 @@ void CheckQuestion(const sc::Question& q, const Value& rec, const std::string& w
   EXPECT_EQ(q.instructions(), rec.Find("instructions")->as_string()) << what;
   EXPECT_EQ(q.RenderedOptions(), Strings(*rec.Find("options"))) << what;
   EXPECT_EQ(q.Labels(), Strings(*rec.Find("labels"))) << what;
-  if (const Value* lg = rec.Find("legend"); lg != nullptr && !lg->is_null()) EXPECT_EQ(q.Legend(), Strings(*lg)) << what;
+  if (const Value* lg = rec.Find("legend"); lg != nullptr && !lg->is_null()) {
+    EXPECT_EQ(q.Legend(), Strings(*lg)) << what;
+  }
   std::vector<int> want;
   if (const Value* o = rec.Find("option_order"); o != nullptr && !o->is_null()) {
     for (const Value& v : o->items()) want.push_back(int(v.as_int()));

@@ -3,9 +3,12 @@
 // PredictBatch states against a question set. Hooks, the confidence gate, predict_long, calibration
 // and digests are later changes.
 //
-// Errors are returned as Result<T>; no exception crosses this API. An Agent is safe for concurrent
-// use: any number of threads may call Predict while another calls Close, which waits for the calls
-// in flight and then closes the Session.
+// Errors are returned as Result<T>; no exception crosses this API, and an exception thrown by a
+// Session is caught and reported as an error. An Agent is safe for concurrent use: any number of
+// threads may call Predict while another calls Close.
+//
+// Deferred to later changes: per-language temperatures (CallOptions has no `lang` until then), the
+// confidence gate, predict_long, hooks, calibration and digests.
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
@@ -46,8 +49,9 @@ struct Config {
 
 // Per-call settings. Zero values mean the defaults.
 struct CallOptions {
-  std::string lang;             // language tag selecting a temperature override
-  int64_t batch_size = 0;       // states per session run; <= 0 runs all states at once
+  // States per session run. <= 0 runs all states at once, split only where one run would exceed
+  // infer::kMaxTensorElements in any tensor. A positive value is used as given; a run over the cap fails.
+  int64_t batch_size = 0;
   bool sort_by_length = false;  // group similar lengths per run; results stay in input order
   int64_t max_len = 0;          // > 0 overrides the checkpoint's
   int64_t head_max_len = 0;     // > 0 overrides the checkpoint's
@@ -75,8 +79,11 @@ class Agent {
   Result<std::vector<schema::Prediction>> PredictBatch(const std::vector<pyvalue::Value>& states,
                                                        const schema::Questions& qs,
                                                        const CallOptions& opts = {}) const;
-  // Waits for the calls in flight, then closes the session. Idempotent; later calls fail with kClosed.
-  // Returns the session's close error, "" on success.
+  // Refuses new calls at once and waits for each call in flight to return; a call with runs left is
+  // cut short with kClosed at its next run. Then closes the session exactly once, outside the lock;
+  // concurrent and later Closes return the same result. Later calls fail with kClosed. Returns the
+  // session's close error, "" on success. Must not be called from inside a Session (it would wait
+  // for itself).
   std::string Close();
 
  private:
@@ -100,6 +107,7 @@ class Agent {
   mutable std::condition_variable cv_;
   mutable int64_t inflight_ = 0;
   bool shut_ = false;
+  bool close_started_ = false;
   bool close_done_ = false;
   std::string close_err_;
   std::atomic<bool> closed_{false};

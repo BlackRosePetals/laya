@@ -4,8 +4,8 @@
 // does), softmax with the maximum subtracted, undo the option order, derive the type's fields and
 // round every number to four decimals as Python's round(x, 4) does.
 //
-// Everything after the float32 quotient is double here; Python computes exp and the sum in float32.
-// The choice is the first maximum, so an exact tie falls to the lower index as numpy.argmax does.
+// Reported numbers are double after the float32 quotient. The choice is made on float32 probabilities
+// (exp rounded to float32, numpy's pairwise float32 sum), first maximum wins, as numpy.argmax does.
 #include <array>
 #include <cstdint>
 #include <map>
@@ -43,7 +43,7 @@ struct LanguageTemperatures {
   std::map<std::string, double> by_options;
 };
 
-// A checkpoint's temperature tables, every value already clamped. Immutable once built.
+// A checkpoint's temperature tables, every value already clamped. Immutable once built apart from SetBinning.
 class Temperatures {
  public:
   Temperatures() = default;  // all 1.0
@@ -57,9 +57,12 @@ class Temperatures {
   double For(schema::Type t, int64_t k, std::string_view lang, bool* override_used = nullptr) const;
   const std::array<double, 3>& by_type() const { return by_type_; }
   const std::map<std::string, double>& by_options() const { return by_options_; }
-  std::map<std::string, Bins> binning;  // empty: no recalibration
+  // Recalibration bins by bucket; empty means none.
+  const std::map<std::string, Bins>& binning() const { return binning_; }
+  void SetBinning(std::map<std::string, Bins> b) { binning_ = std::move(b); }
 
  private:
+  std::map<std::string, Bins> binning_;
   std::array<double, 3> by_type_{1, 1, 1};
   std::map<std::string, double> by_options_;
   std::map<std::string, LanguageTemperatures> by_language_;

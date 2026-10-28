@@ -27,5 +27,10 @@ struct Row {
 // id, and a batch that would exceed infer::kMaxTensorElements.
 Result<infer::Batch> Collate(const std::vector<Row>& rows, int32_t pad_id);
 
+// How many states each session run takes when one run must not exceed infer::kMaxTensorElements in
+// any tensor. Each state contributes rows_per_state rows of length[i] tokens and width[i] markers,
+// taken in order; a state that alone exceeds the cap still gets a run (Collate refuses it).
+std::vector<size_t> PlanRuns(size_t rows_per_state, const std::vector<int64_t>& length, const std::vector<int64_t>& width);
+
 }  // namespace collate
 }  // namespace laya

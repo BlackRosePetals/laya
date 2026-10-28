@@ -28,6 +28,8 @@ class StubSession : public laya::infer::Session {
     std::function<void()> on_run;                       // called at the start of every Run
     std::function<void(laya::infer::Output*)> tamper;   // may break the output
     std::string fail;                                   // non-empty: Run fails with this
+    bool ignore_cancel = false;                         // Run does not look at the token
+    std::string close_error;                            // what Close returns
   };
   explicit StubSession(std::shared_ptr<State> s = std::make_shared<State>()) : st_(std::move(s)) {}
   ~StubSession() override {
@@ -45,7 +47,7 @@ class StubSession : public laya::infer::Session {
       hook = st_->on_run;
     }
     if (hook) hook();
-    if (cancel.cancelled()) return R::Fail("cancelled");
+    if (!st_->ignore_cancel && cancel.cancelled()) return R::Fail(laya::infer::kCancelled);
     RunRecord rec;
     rec.rows = b.rows, rec.length = b.length, rec.markers = b.markers;
     laya::infer::Output out;
@@ -75,7 +77,7 @@ class StubSession : public laya::infer::Session {
     std::lock_guard<std::mutex> l(st_->mu);
     st_->closes++;
     st_->closed = true;
-    return "";
+    return st_->close_error;
   }
 
  private:

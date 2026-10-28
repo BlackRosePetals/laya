@@ -56,5 +56,26 @@ Result<infer::Batch> Collate(const std::vector<Row>& rows, int32_t pad_id) {
   return R::Ok(std::move(b));
 }
 
+std::vector<size_t> PlanRuns(size_t rows_per_state, const std::vector<int64_t>& length, const std::vector<int64_t>& width) {
+  std::vector<size_t> runs;
+  const int64_t per = int64_t(rows_per_state);
+  size_t count = 0;
+  int64_t longest = 0, widest = kMinMarkerSlots;
+  for (size_t i = 0; i < length.size(); i++) {
+    const int64_t l = std::max(longest, length[i]), w = std::max(widest, width[i]);
+    const int64_t rows = int64_t(count + 1) * per;
+    if (count > 0 && (l > infer::kMaxTensorElements / rows || w > infer::kMaxTensorElements / rows)) {
+      runs.push_back(count);
+      count = 0;
+      longest = 0, widest = kMinMarkerSlots;
+    }
+    longest = std::max(longest, length[i]);
+    widest = std::max(widest, width[i]);
+    count++;
+  }
+  if (count > 0) runs.push_back(count);
+  return runs;
+}
+
 }  // namespace collate
 }  // namespace laya

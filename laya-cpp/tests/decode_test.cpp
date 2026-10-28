@@ -50,7 +50,7 @@ TEST(DecodeGolden, DecodeJson) {
   for (const char* name : kModels) {
     LAYA_GOLDEN_LIST(entry, "decode.json", name);
     const Value* cases = entry->Find("cases");
-    LAYA_EXPECT_ROWS(cases, 20);
+    LAYA_EXPECT_ROWS(cases, 24);
     const dc::Temperatures temps = TempsOf(*entry->Find("config"));
     for (size_t i = 0; i < cases->size(); i++) {
       const Value& rec = cases->value(i);
@@ -344,6 +344,18 @@ TEST(Decode, QuotientTieFallsToTheFirst) {
   }
 }
 
+// numpy keeps exp and the sum in float32, so a logit gap below float32 resolution is an exact tie.
+TEST(Decode, SubUlpGapIsAFloat32TieForTheChoice) {
+  const float lo = 1e-6f, hi = std::nextafter(lo, 1.0f);
+  auto t = Uniform(1);
+  auto key = [&](int n, std::vector<float> v) { return dc::Decode(Pick(n), RowOf(v), "", &t).value().choice.Key(); };
+  EXPECT_EQ(key(2, {lo, hi}), "o0");
+  EXPECT_EQ(key(2, {hi, lo}), "o0");
+  EXPECT_EQ(key(3, {lo, hi, hi}), "o0");
+  EXPECT_EQ(key(3, {lo, 5.0f, hi}), "o1");  // a real gap still decides
+  EXPECT_EQ(key(3, {-3.0f, lo, hi}), "o1");
+}
+
 TEST(Decode, FirstMaximumWinsAnExactTie) {
   auto t = Uniform(1);
   EXPECT_EQ(dc::Decode(Pick(3), RowOf({1, 1, 1}), "", &t).value().choice.Key(), "o0");
@@ -393,16 +405,24 @@ TEST(Decode, OptionOrderIsUndone) {
   EXPECT_EQ(a.value().choice.Key(), "o2");
 }
 
+TEST(Temperatures, SamePrimarySubtagLastWins) {
+  auto js = laya::pyvalue::Parse(R"({"zh-CN":{"temperature":[2,2,2]},"zh-TW":{"temperature":[4,4,4]}})").value();
+  auto t = dc::Temperatures::Of(nullptr, nullptr, &js).value();
+  EXPECT_EQ(t.For(sc::Type::Choice, 2, "zh", nullptr), 4.0);
+}
+
 TEST(Decode, BinningReplacesTheConfidenceOnlyWithoutALanguageOverride) {
   auto js = laya::pyvalue::Parse(R"({"l":{"zh":null}})").value();
   auto t = dc::Temperatures::Of(nullptr, nullptr, js.Find("l")).value();
-  t.binning["choice:2"].values = {0.25, 0.75};
+  std::map<std::string, dc::Bins> bins;
+  bins["choice:2"].values = {0.25, 0.75};
+  t.SetBinning(bins);
   auto plain = dc::Decode(Pick(2), RowOf({4, 0}), "", &t).value();
   EXPECT_EQ(plain.answer_confidence, 0.75);  // 0.98 falls in the top of two bins
   auto zh = dc::Decode(Pick(2), RowOf({4, 0}), "zh", &t).value();
   EXPECT_NE(zh.answer_confidence, 0.75);
-  EXPECT_EQ(dc::ApplyBinning(1.0, "choice:2", t.binning), 0.75);  // clamped into the last bin
-  EXPECT_EQ(dc::ApplyBinning(0.3, "absent", t.binning), 0.3);
+  EXPECT_EQ(dc::ApplyBinning(1.0, "choice:2", t.binning()), 0.75);  // clamped into the last bin
+  EXPECT_EQ(dc::ApplyBinning(0.3, "absent", t.binning()), 0.3);
 }
 
 TEST(ActionProbabilities, SoftmaxAndRefusals) {

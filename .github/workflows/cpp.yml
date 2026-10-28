@@ -42,7 +42,7 @@ concurrency:
 env:
   # The test floor: the number of ctest tests laya-cpp registers (the GoogleTest cases plus
   # compile_flags). Raise it with every test added.
-  MIN_TESTS: "409"
+  MIN_TESTS: "423"
   GOLDENS: ${{ github.workspace }}/.cpp-goldens
   LAYA_GOLDENS: ${{ github.workspace }}/.cpp-goldens
   LAYA_CHECKPOINTS: ${{ github.workspace }}/laya-java/.work/checkpoints   # the tokenizer tests need both shipped checkpoints
@@ -60,6 +60,10 @@ jobs:
       matrix:
         compiler: [g++, clang++]
         preset: [debug, asan-ubsan]
+        include:
+          # The Agent claims thread safety; the whole suite runs under ThreadSanitizer once.
+          - compiler: clang++
+            preset: tsan
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0

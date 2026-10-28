@@ -170,6 +170,7 @@ struct Usage {
   bool truncated = false;
   std::vector<std::string> truncated_questions;
   std::vector<CollapsedQuestion> collapsed_options;
+  bool bare = false;  // only input_tokens and output_tokens (a call with no questions)
   int64_t windows = 0;
   int64_t truncated_windows = 0;  // with windows > 1, the "truncated" key is this count
   Result<std::string> ToJson() const;

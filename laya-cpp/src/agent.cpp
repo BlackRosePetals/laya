@@ -1,6 +1,7 @@
 #include "laya/agent.hpp"
 
 #include <algorithm>
+#include <exception>
 #include <fstream>
 #include <sstream>
 
@@ -56,9 +57,26 @@ Result<int64_t> LengthField(const Value& obj, const char* key, int64_t dflt) {
 
 }  // namespace
 
+namespace {
+
+// Closes the session on every failure path of Open; empty once the agent owns it.
+struct SessionGuard {
+  std::unique_ptr<infer::Session>& s;
+  ~SessionGuard() {
+    if (!s) return;
+    try {
+      s->Close();
+    } catch (...) {
+    }
+  }
+};
+
+}  // namespace
+
 Result<std::unique_ptr<Agent>> Agent::Open(const std::string& dir, std::unique_ptr<infer::Session> session) {
   using R = Result<std::unique_ptr<Agent>>;
   if (!session) return R::Fail("agent: Open needs a session");
+  SessionGuard guard{session};
   std::ifstream in(dir + "/" + kConfigFile, std::ios::binary);
   if (!in) return R::Fail(std::string("agent: ") + kConfigFile + ": cannot read " + dir + "/" + kConfigFile);
   std::stringstream ss;
@@ -72,6 +90,7 @@ Result<std::unique_ptr<Agent>> Agent::OpenParts(std::string_view config_json, to
                                                 std::unique_ptr<infer::Session> session) {
   using R = Result<std::unique_ptr<Agent>>;
   if (!session) return R::Fail("agent: Open needs a session");
+  SessionGuard guard{session};
   const std::string where = std::string("agent: ") + kConfigFile + ": ";
   auto parsed = pyvalue::Parse(config_json);
   if (!parsed.ok()) return R::Fail(where + parsed.error());
@@ -154,10 +173,24 @@ std::string Agent::Close() {
   shut_ = true;
   closed_.store(true);
   cv_.wait(lock, [&] { return inflight_ == 0; });
-  if (!close_done_) {
-    close_done_ = true;
-    if (sess_) close_err_ = sess_->Close();
+  if (close_started_) {
+    cv_.wait(lock, [&] { return close_done_; });
+    return close_err_;
   }
+  close_started_ = true;
+  lock.unlock();
+  std::string err;
+  try {
+    if (sess_) err = sess_->Close();
+  } catch (const std::exception& e) {
+    err = std::string("agent: session Close threw: ") + e.what();
+  } catch (...) {
+    err = "agent: session Close threw";
+  }
+  lock.lock();
+  close_err_ = err;
+  close_done_ = true;
+  cv_.notify_all();
   return close_err_;
 }
 
@@ -195,6 +228,7 @@ Result<std::vector<schema::Prediction>> Agent::PredictBatch(const std::vector<Va
   if (states.empty()) return R::Ok({});
   if (qs.size() == 0) {
     std::vector<schema::Prediction> preds(states.size());
+    for (auto& p : preds) p.usage.bare = true;  // what the Python ONNX agent returns with no questions
     return R::Ok(std::move(preds));
   }
   return Chunks(states, qs, opts);
@@ -245,10 +279,25 @@ Result<std::vector<schema::Prediction>> Agent::Chunks(const std::vector<Value>& 
       }
       std::stable_sort(order.begin(), order.end(), [&](size_t x, size_t y) { return longest[x] < longest[y]; });
     }
-    for (size_t off = 0; off < len; off += chunk) {
+    std::vector<size_t> sizes;  // states per run
+    if (c.batch_size > 0) {
+      for (size_t off = 0; off < len; off += chunk) sizes.push_back(std::min(chunk, len - off));
+    } else {
+      std::vector<int64_t> length(len), width(len);
+      for (size_t i = 0; i < len; i++) {
+        for (const auto& s : encoded[order[i]]) {
+          length[i] = std::max(length[i], int64_t(s.ids.size()));
+          width[i] = std::max(width[i], int64_t(s.markers.size()));
+        }
+      }
+      sizes = collate::PlanRuns(qs.size(), length, width);
+    }
+    size_t off = 0;
+    for (size_t take : sizes) {
       if (c.cancel.cancelled()) return R::Fail(kCancelled);
       if (closed_.load()) return R::Fail(kClosed);
-      std::vector<size_t> idx(order.begin() + std::ptrdiff_t(off), order.begin() + std::ptrdiff_t(std::min(off + chunk, len)));
+      std::vector<size_t> idx(order.begin() + std::ptrdiff_t(off), order.begin() + std::ptrdiff_t(off + take));
+      off += take;
       auto preds = Run(qs, encoded, idx, c);
       if (!preds.ok()) return R::Fail(preds.error());
       for (size_t j = 0; j < idx.size(); j++) results[start + idx[j]] = std::move(preds.value()[j]);
@@ -301,8 +350,15 @@ Result<std::vector<schema::Prediction>> Agent::Run(const schema::Questions& qs, 
                    std::to_string(b.markers) + " marker slots: " + why);
   };
   if (std::string bad = b.Validate(); !bad.empty()) return fail(bad);
-  auto out = sess_->Run(b, c.cancel);
-  if (!out.ok()) return c.cancel.cancelled() ? R::Fail(kCancelled) : fail(out.error());
+  Result<infer::Output> out = Result<infer::Output>::Fail("");
+  try {
+    out = sess_->Run(b, c.cancel);
+  } catch (const std::exception& e) {
+    return fail(std::string("session threw: ") + e.what());
+  } catch (...) {
+    return fail("session threw");
+  }
+  if (!out.ok()) return infer::IsCancelled(out.error()) ? R::Fail(kCancelled) : fail(out.error());
   if (std::string bad = out.value().Check(b); !bad.empty()) return fail(bad);
   const infer::Output& o = out.value();
 
@@ -322,7 +378,7 @@ Result<std::vector<schema::Prediction>> Agent::Run(const schema::Questions& qs, 
                        o.logits.begin() + std::ptrdiff_t((at + 1) * size_t(b.markers)));
       dr.k = int64_t(seqs[r].markers.size());
       dr.act = act.value()[0];
-      auto ans = decode::Decode(e.question, dr, c.lang, &temps_);
+      auto ans = decode::Decode(e.question, dr, "", &temps_);
       if (!ans.ok()) return fail("question " + e.id + ": " + ans.error());
       preds[j].answers.push_back({e.id, std::move(ans).value()});
     }

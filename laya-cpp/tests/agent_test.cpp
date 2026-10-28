@@ -6,6 +6,7 @@
 #include <cmath>
 #include <fstream>
 #include <sstream>
+#include <stdexcept>
 #include <thread>
 
 #include "checkpoint.hpp"
@@ -103,6 +104,30 @@ TEST(Infer, ValidateCatchesEachShape) {
   EXPECT_NE(bad([](in::Batch& b) { b.rows = int64_t(1) << 62; }), "");
 }
 
+TEST(Infer, OutputCheckDoesNotOverflowOnAHostileBatch) {
+  in::Batch b;
+  b.rows = int64_t(1) << 40;
+  b.markers = int64_t(1) << 40;
+  in::Output o;
+  EXPECT_NE(o.Check(b), "");
+  b.rows = -1;
+  EXPECT_NE(o.Check(b), "");
+}
+
+TEST(Collate, PlanRunsSplitsOnlyAtTheTensorCap) {
+  using laya::collate::PlanRuns;
+  // 32769 rows of 512 tokens: one row over 2^24 elements.
+  EXPECT_EQ(PlanRuns(1, std::vector<int64_t>(32768, 512), std::vector<int64_t>(32768, 2)), (std::vector<size_t>{32768}));
+  EXPECT_EQ(PlanRuns(1, std::vector<int64_t>(32769, 512), std::vector<int64_t>(32769, 2)), (std::vector<size_t>{32768, 1}));
+  // three rows per state: 10922 states fit, the 10923rd starts a new run
+  EXPECT_EQ(PlanRuns(3, std::vector<int64_t>(10923, 512), std::vector<int64_t>(10923, 2)), (std::vector<size_t>{10922, 1}));
+  // the marker width splits too
+  EXPECT_EQ(PlanRuns(1, std::vector<int64_t>(3, 4), std::vector<int64_t>(3, 6000000)), (std::vector<size_t>{2, 1}));
+  // one state over the cap alone is still one run (collate refuses it)
+  EXPECT_EQ(PlanRuns(1, {int64_t(1) << 25}, {2}), (std::vector<size_t>{1}));
+  EXPECT_TRUE(PlanRuns(1, {}, {}).empty());
+}
+
 TEST(Infer, OutputCheck) {
   in::Batch b = laya::collate::Collate({Seq({1, 2}, {0, 1})}, 0).value();
   in::Output o;
@@ -113,10 +138,11 @@ TEST(Infer, OutputCheck) {
   EXPECT_NE(o.Check(b), "");
 }
 
-TEST(CancelToken, CopiesShareAFlagAndADefaultNeverFires) {
+TEST(CancelToken, CopiesShareAFlagAndADefaultFires) {
   laya::CancelToken none;
-  none.Cancel();
   EXPECT_FALSE(none.cancelled());
+  none.Cancel();
+  EXPECT_TRUE(none.cancelled());
   laya::CancelToken a = laya::CancelToken::Make(), b = a;
   EXPECT_FALSE(b.cancelled());
   a.Cancel();
@@ -260,7 +286,7 @@ TEST(AgentGolden, PredictPlan) {
       ag::CallOptions o;
       if (!rec.Find("batch_size")->is_null()) o.batch_size = rec.Find("batch_size")->as_int();
       o.sort_by_length = rec.Find("sort")->as_bool();
-      if (!rec.Find("lang")->is_null()) o.lang = rec.Find("lang")->as_string();
+      // The checkpoints set no language temperatures, so the recorded lang changes nothing.
       rig.st->runs.clear();
       auto preds = rig.agent->PredictBatch(rec.Find("states")->items(), qs.value(), o);
       ASSERT_TRUE(preds.ok()) << t.where << ": " << preds.error();
@@ -516,6 +542,189 @@ TEST(Agent, CloseWaitsForCallsInFlightAndNoneStartsAfter) {
   EXPECT_GT(ok + closed, 0);
 }
 
+// ---- review round 1 ----
+
+class ThrowingSession : public in::Session {
+ public:
+  ThrowingSession(bool run, bool close, int* closes) : run_(run), close_(close), closes_(closes) {}
+  laya::Result<in::Output> Run(const in::Batch&, const laya::CancelToken&) override {
+    if (run_) throw std::runtime_error("run blew up");
+    return laya::Result<in::Output>::Fail("unreachable");
+  }
+  std::string Close() override {
+    (*closes_)++;
+    if (close_) throw std::runtime_error("close blew up");
+    return "";
+  }
+
+ private:
+  bool run_, close_;
+  int* closes_;
+};
+
+Rig OpenWith(const char* model, std::unique_ptr<in::Session> s) {
+  Rig r;
+  const laya::tokenizer::Tokenizer* tok = laya_test::LoadCheckpoint(model);
+  if (tok == nullptr) return r;
+  auto a = ag::Agent::OpenParts(kConfig, *tok, std::move(s));
+  EXPECT_TRUE(a.ok());
+  if (a.ok()) r.agent = std::move(a).value();
+  return r;
+}
+
+TEST(Agent, ASessionThatThrowsIsAnErrorNotATerminate) {
+  int closes = 0;
+  LAYA_RIG_OPEN(rig, OpenWith("english", std::make_unique<ThrowingSession>(true, true, &closes)));
+  auto p = rig.agent->Predict(Value::String("alpha"), Mix());
+  ASSERT_FALSE(p.ok());
+  EXPECT_NE(p.error().find("run blew up"), std::string::npos) << p.error();
+  const std::string first = rig.agent->Close();
+  EXPECT_NE(first.find("close blew up"), std::string::npos) << first;
+  EXPECT_EQ(rig.agent->Close(), first);  // the second Close reports the same error
+  EXPECT_EQ(closes, 1);
+  rig.agent.reset();  // the destructor closes again without terminating
+  EXPECT_EQ(closes, 1);
+}
+
+TEST(Agent, DestroyingWithAThrowingCloseDoesNotTerminate) {
+  int closes = 0;
+  {
+    LAYA_RIG_OPEN(rig, OpenWith("english", std::make_unique<ThrowingSession>(false, true, &closes)));
+  }
+  EXPECT_EQ(closes, 1);
+}
+
+TEST(Agent, CloseReturnsTheSessionErrorToEveryCaller) {
+  LAYA_RIG(rig, "english");
+  rig.st->close_error = "disk gone";
+  std::string a, b;
+  std::thread t1([&] { a = rig.agent->Close(); }), t2([&] { b = rig.agent->Close(); });
+  t1.join();
+  t2.join();
+  EXPECT_EQ(a, "disk gone");
+  EXPECT_EQ(b, "disk gone");
+  EXPECT_EQ(rig.st->closes, 1);
+}
+
+TEST(Agent, NoQuestionsUsageIsTheBareTwoCounters) {
+  LAYA_RIG(rig, "english");
+  auto p = rig.agent->Predict(Value::String("x"), sc::Questions());
+  ASSERT_TRUE(p.ok());
+  // The JSON the Python ONNX agent returns for an empty question set.
+  EXPECT_EQ(p.value().ToJson().value(), R"({"model":"laya-rl-agent-onnx","answers":{},"usage":{"input_tokens":0,"output_tokens":0}})");
+}
+
+TEST(Agent, CancelledCallsReportCancelledEvenWithNothingToDo) {
+  LAYA_RIG(rig, "english");
+  ag::CallOptions o;
+  o.cancel.Cancel();  // a default token fires too
+  auto none = rig.agent->PredictBatch({}, Mix(), o);
+  ASSERT_FALSE(none.ok());
+  EXPECT_TRUE(ag::IsCancelled(none.error()));
+  auto noq = rig.agent->PredictBatch(States(2), sc::Questions(), o);
+  ASSERT_FALSE(noq.ok());
+  EXPECT_TRUE(ag::IsCancelled(noq.error()));
+}
+
+TEST(Agent, ASessionThatIgnoresCancelIsStoppedBeforeTheNextRun) {
+  LAYA_RIG(rig, "english");
+  rig.st->ignore_cancel = true;
+  ag::CallOptions o;
+  o.batch_size = 2;
+  o.sort_by_length = true;
+  o.cancel = laya::CancelToken::Make();
+  rig.st->on_run = [c = o.cancel] { c.Cancel(); };
+  auto p = rig.agent->PredictBatch(States(6), Mix(), o);
+  ASSERT_FALSE(p.ok());
+  EXPECT_TRUE(ag::IsCancelled(p.error())) << p.error();
+  EXPECT_EQ(rig.st->runs.size(), 1u);
+}
+
+// The last run of window one cancels; window two opens with a state that cannot be encoded, and the
+// call must report the cancel, not that state's error.
+TEST(Agent, CancelIsCheckedBeforeEncodingTheNextWindow) {
+  LAYA_RIG(rig, "english");
+  auto states = States(8);
+  Value deep = Value::String("x");
+  for (int i = 0; i < laya::pyvalue::kMaxDepth + 8; i++) deep = Value::Array({std::move(deep)});  // too deep to serialize
+  states.push_back(std::move(deep));
+  ag::CallOptions o;
+  o.batch_size = 1;
+  o.sort_by_length = true;  // windows of eight states
+  o.cancel = laya::CancelToken::Make();
+  rig.st->ignore_cancel = true;
+  ASSERT_FALSE(rig.agent->Predict(states.back(), Mix()).ok());  // it does fail to encode
+  rig.st->runs.clear();
+  int runs = 0;
+  rig.st->on_run = [&, c = o.cancel] {  // the last run of window one cancels
+    if (++runs == 8) c.Cancel();
+  };
+  auto p = rig.agent->PredictBatch(states, Mix(), o);
+  ASSERT_FALSE(p.ok());
+  EXPECT_TRUE(ag::IsCancelled(p.error())) << p.error();
+}
+
+TEST(Agent, ClosedAgentRefusesEmptyAndQuestionlessCalls) {
+  LAYA_RIG(rig, "english");
+  rig.agent->Close();
+  auto a = rig.agent->PredictBatch({}, Mix());
+  ASSERT_FALSE(a.ok());
+  EXPECT_TRUE(ag::IsClosed(a.error()));
+  auto b = rig.agent->PredictBatch(States(2), sc::Questions());
+  ASSERT_FALSE(b.ok());
+  EXPECT_TRUE(ag::IsClosed(b.error()));
+}
+
+TEST(Agent, ASessionErrorSurvivesAFiredToken) {
+  LAYA_RIG(rig, "english");
+  rig.st->ignore_cancel = true;
+  rig.st->fail = "disk on fire";
+  ag::CallOptions o;
+  o.cancel = laya::CancelToken::Make();
+  rig.st->on_run = [c = o.cancel] { c.Cancel(); };
+  auto p = rig.agent->Predict(Value::String("alpha"), Mix(), o);
+  ASSERT_FALSE(p.ok());
+  EXPECT_FALSE(ag::IsCancelled(p.error()));
+  EXPECT_NE(p.error().find("disk on fire"), std::string::npos) << p.error();
+}
+
+// Close does not wait for a call to finish its runs: it waits for the run in flight and the call
+// then fails with kClosed at the next one.
+TEST(Agent, CloseCutsAnInFlightCallShortAtItsNextRun) {
+  LAYA_RIG(rig, "english");
+  std::mutex mu;
+  std::condition_variable cv;
+  bool in_run = false, release = false;
+  rig.st->on_run = [&] {
+    std::unique_lock<std::mutex> l(mu);
+    if (in_run) return;  // only the first run is gated
+    in_run = true;
+    cv.notify_all();
+    cv.wait(l, [&] { return release; });
+  };
+  ag::CallOptions o;
+  o.batch_size = 1;
+  laya::Result<std::vector<sc::Prediction>> got = laya::Result<std::vector<sc::Prediction>>::Fail("unset");
+  std::thread call([&] { got = rig.agent->PredictBatch(States(4), Mix(), o); });
+  {
+    std::unique_lock<std::mutex> l(mu);
+    cv.wait(l, [&] { return in_run; });
+  }
+  std::thread closer([&] { rig.agent->Close(); });
+  while (rig.agent->PredictBatch({}, Mix()).ok()) std::this_thread::yield();  // until Close has begun
+  {
+    std::lock_guard<std::mutex> l(mu);
+    release = true;
+  }
+  cv.notify_all();
+  call.join();
+  closer.join();
+  ASSERT_FALSE(got.ok());
+  EXPECT_TRUE(ag::IsClosed(got.error())) << got.error();
+  EXPECT_EQ(rig.st->runs.size(), 1u);
+  EXPECT_EQ(rig.st->closes, 1);
+}
+
 // ---- Open ----
 
 TEST(AgentOpen, ReadsTheCheckpointDirectory) {
@@ -540,7 +749,15 @@ TEST(AgentOpen, FailureDestroysTheSession) {
   auto a = ag::Agent::Open("/nonexistent/checkpoint", std::move(s));
   EXPECT_FALSE(a.ok());
   EXPECT_TRUE(st->destroyed);
+  EXPECT_EQ(st->closes, 1);  // a failed Open still closes the session
   EXPECT_FALSE(ag::Agent::Open("/x", nullptr).ok());
+  auto s2 = std::make_unique<StubSession>();
+  auto st2 = s2->state();
+  const laya::tokenizer::Tokenizer* tok = laya_test::LoadCheckpoint("english");
+  if (tok != nullptr) {
+    EXPECT_FALSE(ag::Agent::OpenParts("[]", *tok, std::move(s2)).ok());
+    EXPECT_EQ(st2->closes, 1);
+  }
 }
 
 TEST(AgentOpen, RefusesABadConfig) {

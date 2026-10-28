@@ -11,6 +11,9 @@ const char* const kQType = "qtype";
 const char* const kLogits = "logits";
 const char* const kActLogits = "act_logits";
 
+const char* const kCancelled = "infer: cancelled";
+bool IsCancelled(const std::string& e) { return e == kCancelled; }
+
 namespace {
 std::string Shape(const char* name, size_t got, int64_t want) {
   return std::string("infer: ") + name + " has " + std::to_string(got) + " values, want " + std::to_string(want);
@@ -57,6 +60,9 @@ std::string Batch::Validate() const {
 }
 
 std::string Output::Check(const Batch& b) const {
+  if (b.rows < 0 || b.markers < 0 || (b.rows > 0 && (b.markers > kMaxTensorElements / b.rows || b.rows > kMaxTensorElements))) {
+    return "infer: batch dimensions " + std::to_string(b.rows) + " x " + std::to_string(b.markers) + " are out of range";
+  }
   if (int64_t(logits.size()) != b.rows * b.markers) return Shape(kLogits, logits.size(), b.rows * b.markers);
   if (int64_t(act_logits.size()) != b.rows * 2) return Shape(kActLogits, act_logits.size(), b.rows * 2);
   return "";

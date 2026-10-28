@@ -190,6 +190,29 @@ double Temperatures::For(schema::Type typ, int64_t k, std::string_view lang, boo
 
 namespace {
 
+// numpy's float32 sum of a contiguous row (pairwise, eight accumulators from eight values up).
+float PairwiseSum(const float* a, size_t n) {
+  if (n < 8) {
+    float r = 0;
+    for (size_t i = 0; i < n; i++) r += a[i];
+    return r;
+  }
+  if (n <= 128) {
+    float r[8];
+    for (size_t j = 0; j < 8; j++) r[j] = a[j];
+    size_t i = 8;
+    for (; i < n - (n % 8); i += 8) {
+      for (size_t j = 0; j < 8; j++) r[j] += a[i + j];
+    }
+    float res = ((r[0] + r[1]) + (r[2] + r[3])) + ((r[4] + r[5]) + (r[6] + r[7]));
+    for (; i < n; i++) res += a[i];
+    return res;
+  }
+  size_t half = n / 2;
+  half -= half % 8;
+  return PairwiseSum(a, half) + PairwiseSum(a + half, n - half);
+}
+
 std::vector<schema::Probability> Probabilities(const std::vector<schema::Label>& labels, const std::vector<double>& p) {
   std::vector<schema::Probability> out;
   out.reserve(p.size());
@@ -250,17 +273,26 @@ Result<schema::Answer> Decode(const schema::Question& q, const Row& row, std::st
     sum += p[i];
   }
   for (double& v : p) v /= sum;
+  // The choice is made on float32 probabilities as numpy computes them: a gap below float32 resolution
+  // is an exact tie that argmax gives to the lower index. Reported numbers stay double.
+  std::vector<float> pf(z.size());
+  for (size_t i = 0; i < z.size(); i++) pf[i] = float(std::exp(double(z[i] - peak)));
+  const float total = PairwiseSum(pf.data(), pf.size());
+  for (float& v : pf) v /= total;
   // The row is in slot order; everything below indexes by option.
   const std::vector<int>& order = q.OptionOrder();
   if (order.size() == p.size()) {
     std::vector<double> canonical(p.size());
     for (size_t slot = 0; slot < order.size(); slot++) canonical[size_t(order[slot])] = p[slot];
     p = std::move(canonical);
+    std::vector<float> canonical_f(pf.size());
+    for (size_t slot = 0; slot < order.size(); slot++) canonical_f[size_t(order[slot])] = pf[slot];
+    pf = std::move(canonical_f);
   }
   schema::Answer a;
   a.type = typ;
   double conf = AnswerConfidence(p);
-  if (t != nullptr && !override_used) conf = ApplyBinning(conf, Bucket(typ, k), t->binning);
+  if (t != nullptr && !override_used) conf = ApplyBinning(conf, Bucket(typ, k), t->binning());
   a.answer_confidence = Round4(conf);
   a.act_probability = Round4(double(row.act));
   if (typ == schema::Type::Noul) {
@@ -276,8 +308,8 @@ Result<schema::Answer> Decode(const schema::Question& q, const Row& row, std::st
   a.probabilities = Probabilities(labels, p);
   if (typ == schema::Type::Choice) {
     size_t best = 0;
-    for (size_t i = 0; i < p.size(); i++) {
-      if (p[i] > p[best]) best = i;  // strict: the first maximum wins, as numpy.argmax breaks a tie
+    for (size_t i = 0; i < pf.size(); i++) {
+      if (pf[i] > pf[best]) best = i;  // strict: the first maximum wins, as numpy.argmax breaks a tie
     }
     a.choice = labels[best];
   } else {

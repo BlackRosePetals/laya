@@ -897,6 +897,7 @@ Result<Answer> Answer::FromJson(const Value& v) {
 }
 
 Result<std::string> Usage::ToJson() const {
+  if (bare) return Result<std::string>::Ok("{\"input_tokens\":" + N(input_tokens) + ",\"output_tokens\":" + N(output_tokens) + "}");
   bool scanned = windows > 1;
   if (scanned && state_tokens == 0 && state_tokens_dropped == 0 && truncated_windows == 0 &&
       truncated_questions.empty() && collapsed_options.empty()) {

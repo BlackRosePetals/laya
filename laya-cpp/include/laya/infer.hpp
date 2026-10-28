@@ -45,6 +45,10 @@ struct Output {
   std::string Check(const Batch& b) const;  // empty when both hold the lengths b calls for
 };
 
+// What a Session returns from Run when the cancel token fired and it stopped early.
+extern const char* const kCancelled;
+bool IsCancelled(const std::string& error);
+
 // Run may be called from several threads at once. Close is idempotent and never runs concurrently
 // with Run (the agent guarantees it). A Session is owned through std::unique_ptr, so it is moved,
 // never copied.
@@ -54,7 +58,8 @@ class Session {
   Session(const Session&) = delete;
   Session& operator=(const Session&) = delete;
   virtual ~Session() = default;
-  // Must not modify or retain b. Should return early with an error when cancel fires.
+  // Must not modify or retain b. Should return early with kCancelled when cancel fires. No Session
+  // method may throw; the agent catches anyway and reports the exception as an error.
   virtual Result<Output> Run(const Batch& b, const CancelToken& cancel) = 0;
   // Releases the runtime; "" on success, else the error. Run after Close fails.
   virtual std::string Close() = 0;

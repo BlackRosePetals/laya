@@ -1,6 +1,7 @@
 // laya::tokenizer against the `tokenizers` crate (through the Python-recorded goldens) and against
 // hand-built tokenizers. Ported from laya-go/tokenizer's tests.
 #include <algorithm>
+#include <chrono>
 #include <cstdlib>
 #include <fstream>
 #include <mutex>
@@ -84,6 +85,17 @@ Tokenizer MustParse(const std::string& json, const char* config = nullptr) {
   EXPECT_TRUE(t.ok()) << (t.ok() ? "" : t.error());
   if (!t.ok()) std::abort();
   return std::move(t).value();
+}
+
+// An added_tokens entry with every field the crate requires; `on` names the flags that are true.
+std::string Tok(const std::string& content, int id, std::initializer_list<const char*> on = {}) {
+  std::string out = "{\"content\":\"" + content + "\",\"id\":" + std::to_string(id);
+  for (const char* flag : {"special", "lstrip", "rstrip", "single_word", "normalized"}) {
+    bool v = false;
+    for (const char* o : on) v = v || std::string(o) == flag;
+    out += std::string(",\"") + flag + "\":" + (v ? "true" : "false");
+  }
+  return out + "}";
 }
 
 // A tiny byte-level tokenizer built in the test, so the loader is checked without a checkpoint.
@@ -181,11 +193,11 @@ TEST(TokenizerNormalize, LowercaseMatchesTheCrateOverAllUnicode) {
 TEST(TokenizerAdded, SingleWordFlankMatchesTheCrate) {
   LAYA_GOLDEN_LIST(sw, "go_extra.json", "single_word");
   Tokenizer tok = MustParse(
-      R"({"model":{"type":"BPE","vocab":{"a":0,"<unk>":2},"merges":[],"unk_token":"<unk>"},
-        "added_tokens":[{"content":"TOK","id":1,"single_word":true,"special":true}]})");
+      R"({"model":{"type":"BPE","vocab":{"a":0,"<unk>":1},"merges":[],"unk_token":"<unk>"},
+        "added_tokens":[{"content":"TOK","id":2,"single_word":true,"special":true,"lstrip":false,"rstrip":false,"normalized":false}]})");
   auto standalone = [&](const std::string& s) {
     for (int32_t id : tok.Encode(s)) {
-      if (id == 1) return std::string("1");
+      if (id == 2) return std::string("1");
     }
     return std::string("0");
   };
@@ -478,7 +490,7 @@ TEST(TokenizerLoader, Refuses) {
       {"a merge that is not a pair", Replace(good, "\"a b\"", "[\"a\"]"), false},
       {"a space-joined merge with an empty half", Replace(good, "\"a b\"", "\"a \""), false},
       {"an added token with no id", ByteLevelSpec(",\"added_tokens\":[{\"content\":\"x\"}]"), false},
-      {"two added tokens sharing an id", ByteLevelSpec(",\"added_tokens\":[{\"content\":\"x\",\"id\":300},{\"content\":\"y\",\"id\":300}]"), false},
+      {"two added tokens sharing an id", ByteLevelSpec(",\"added_tokens\":[" + Tok("x", 257) + "," + Tok("y", 257) + "]"), false},
       {"a vocabulary giving one id to two tokens", Replace(good, "\"ab\":256", "\"ab\":0"), false},
       {"no vocabulary", "{\"model\":{\"type\":\"BPE\",\"merges\":[]}}", false},
       {"not JSON", "{", false},
@@ -520,26 +532,24 @@ TEST(TokenizerLoader, IdsFarBeyondTheVocabularyAreRefused) {
 
 TEST(TokenizerAdded, LongestLstripRstripSingleWordNormalized) {
   Tokenizer tok = MustParse(ByteLevelSpec(
-      ",\"added_tokens\":[{\"content\":\"<S>\",\"id\":300,\"special\":true,\"normalized\":false},"
-      "{\"content\":\"<SS>\",\"id\":301,\"special\":true,\"normalized\":false},"
-      "{\"content\":\"[M]\",\"id\":302,\"special\":true,\"lstrip\":true,\"rstrip\":true},"
-      "{\"content\":\"word\",\"id\":303,\"single_word\":true},"
-      "{\"content\":\"\xC3\xA9" "clair\",\"id\":304,\"normalized\":true},"
-      "{\"content\":\"\xC2\xA7\",\"id\":305},{\"content\":\"!\",\"id\":306}],\"decoder\":{\"type\":\"ByteLevel\"}"));
+      ",\"added_tokens\":[" + Tok("<S>", 257, {"special"}) + "," + Tok("<SS>", 258, {"special"}) + "," +
+      Tok("[M]", 259, {"special", "lstrip", "rstrip"}) + "," + Tok("word", 260, {"single_word"}) + "," +
+      Tok("\xC3\xA9" "clair", 261, {"normalized"}) + "," + Tok("\xC2\xA7", 167) + "," + Tok("!", 33) +
+      "],\"decoder\":{\"type\":\"ByteLevel\"}"));
   using V = std::vector<int32_t>;
-  EXPECT_EQ(tok.Encode("<SS><S>"), (V{301, 300})) << "the longest token wins at a position";
-  EXPECT_EQ(tok.Encode("a   [M]   b"), (V{97, 302, 98})) << "lstrip and rstrip absorb the white space";
-  EXPECT_EQ(tok.Encode("word"), (V{303}));
+  EXPECT_EQ(tok.Encode("<SS><S>"), (V{258, 257})) << "the longest token wins at a position";
+  EXPECT_EQ(tok.Encode("a   [M]   b"), (V{97, 259, 98})) << "lstrip and rstrip absorb the white space";
+  EXPECT_EQ(tok.Encode("word"), (V{260}));
   auto inside = tok.Encode("swords word.");
   ASSERT_GE(inside.size(), 3u);
-  EXPECT_EQ(inside[inside.size() - 2], 303) << "a single_word token inside a word is not matched but a free one is";
-  EXPECT_EQ(std::count(inside.begin(), inside.end(), 303), 1) << "swords holds the word but not as a word";
-  EXPECT_EQ(tok.Encode("\xC3\xA9" "clair"), (V{304}));
-  EXPECT_EQ(tok.Encode("a\xC2\xA7" "b!"), (V{97, 305, 98, 306}));
+  EXPECT_EQ(inside[inside.size() - 2], 260) << "a single_word token inside a word is not matched but a free one is";
+  EXPECT_EQ(std::count(inside.begin(), inside.end(), 260), 1) << "swords holds the word but not as a word";
+  EXPECT_EQ(tok.Encode("\xC3\xA9" "clair"), (V{261}));
+  EXPECT_EQ(tok.Encode("a\xC2\xA7" "b!"), (V{97, 167, 98, 33})) << "added tokens already in the vocabulary keep its ids";
   EXPECT_EQ(tok.Encode("<S"), (V{60, 83})) << "a prefix of a token is not the token";
-  EXPECT_EQ(tok.Decode({300, 97, 301}, true), "a");
-  EXPECT_EQ(tok.Decode({300, 97}, false), "<S>a");
-  EXPECT_EQ(tok.SpecialId("<S>"), std::optional<int32_t>(300));
+  EXPECT_EQ(tok.Decode({257, 97, 258}, true), "a");
+  EXPECT_EQ(tok.Decode({257, 97}, false), "<S>a");
+  EXPECT_EQ(tok.SpecialId("<S>"), std::optional<int32_t>(257));
   EXPECT_FALSE(tok.SpecialId("word").has_value());
   EXPECT_EQ(tok.SpecialTokens().size(), 3u);
 }
@@ -551,13 +561,13 @@ TEST(TokenizerLoader, RolesFromTokenizerConfigAndDirectoryLayout) {
   };
   std::string cmd = "mkdir -p '" + base + "/m/tokenizer' '" + base + "/plain' '" + base + "/empty'";
   ASSERT_EQ(std::system(cmd.c_str()), 0);
-  std::string spec = ByteLevelSpec(",\"added_tokens\":[{\"content\":\"<c>\",\"id\":300,\"special\":true},{\"content\":\"<m>\",\"id\":301,\"special\":true}]");
+  std::string spec = ByteLevelSpec(",\"added_tokens\":[" + Tok("<c>", 257, {"special"}) + "," + Tok("<m>", 258, {"special"}) + "]");
   write(base + "/plain/tokenizer.json", spec);
   write(base + "/plain/tokenizer_config.json", "{\"cls_token\":\"<c>\",\"mask_token\":{\"content\":\"<m>\"},\"pad_token\":null}");
   auto t = Tokenizer::LoadDir(base + "/plain");
   ASSERT_TRUE(t.ok()) << t.error();
-  EXPECT_EQ(t.value().Cls(), std::optional<int32_t>(300));
-  EXPECT_EQ(t.value().Mask(), std::optional<int32_t>(301));
+  EXPECT_EQ(t.value().Cls(), std::optional<int32_t>(257));
+  EXPECT_EQ(t.value().Mask(), std::optional<int32_t>(258));
   EXPECT_EQ(t.value().MaskToken(), "<m>");
   EXPECT_FALSE(t.value().Pad().has_value()) << "a null role is absent";
   EXPECT_FALSE(t.value().Sep().has_value()) << "an unnamed role is absent";
@@ -696,8 +706,8 @@ TEST(TokenizerRefusals, SequenceRunsInOrder) {
 }
 
 TEST(TokenizerAdded, RstripAbsorbsAllWhiteSpace) {
-  Tokenizer tok = MustParse(ByteLevelSpec(",\"added_tokens\":[{\"content\":\"[M]\",\"id\":302,\"special\":true,\"rstrip\":true}]"));
-  EXPECT_EQ(tok.Encode("[M]  \t b"), (std::vector<int32_t>{302, 98}));
+  Tokenizer tok = MustParse(ByteLevelSpec(",\"added_tokens\":[" + Tok("[M]", 257, {"special", "rstrip"}) + "]"));
+  EXPECT_EQ(tok.Encode("[M]  \t b"), (std::vector<int32_t>{257, 98}));
 }
 
 // Canonical ordering must run before composition: a + dot above (230) + dot below (220) is a-dot-below
@@ -706,4 +716,263 @@ TEST(TokenizerNormalize, MarksAreReorderedBeforeTheyCompose) {
   EXPECT_EQ(tk::Normalize("a\xCC\x87\xCC\xA3", Form::NFC), "\xE1\xBA\xA1\xCC\x87");
   EXPECT_EQ(tk::Normalize("a\xCC\x87\xCC\xA3", Form::NFKC), "\xE1\xBA\xA1\xCC\x87");
   EXPECT_EQ(tk::Normalize("a\xCC\x87\xCC\xA3", Form::NFD), "a\xCC\xA3\xCC\x87");
+}
+
+// ---- review round 1: every case's expected value is the crate's (tokenizers 0.23.2) ---------------------
+namespace {
+
+std::string NormSpec(const std::string& pattern, const std::string& to = "_") {
+  return "{\"type\":\"Replace\",\"pattern\":{\"Regex\":\"" + pattern + "\"},\"content\":\"" + to + "\"}";
+}
+
+// Letters a-z are 0-25, the marker is 26, <unk> is 27 and the first added token is 28.
+std::string MetaspaceSpec(const std::string& pre, const std::string& normalizer = "null") {
+  std::string vocab;
+  for (char c = 'a'; c <= 'z'; c++) vocab += std::string("\"") + c + "\":" + std::to_string(c - 'a') + ",";
+  vocab += "\"\xE2\x96\x81\":26,\"<unk>\":27";
+  return "{\"model\":{\"type\":\"BPE\",\"vocab\":{" + vocab + "},\"merges\":[],\"unk_token\":\"<unk>\"},\"normalizer\":" + normalizer +
+         ",\"pre_tokenizer\":" + pre + ",\"added_tokens\":[" + Tok("<m>", 28, {"special"}) + "]}";
+}
+
+std::string Metaspace(const char* scheme, bool split = true) {
+  return std::string("{\"type\":\"Metaspace\",\"replacement\":\"\xE2\x96\x81\",\"prepend_scheme\":\"") + scheme + "\",\"split\":" +
+         (split ? "true" : "false") + "}";
+}
+
+using Ids32 = std::vector<int32_t>;
+
+}  // namespace
+
+TEST(TokenizerRegex, RepeatsAreBoundedByProgramSizeAndDepth) {
+  // (((a{1000}){1000}){10})x built about 450 MB of program before the cap.
+  for (const char* p : {"(((a{1000}){1000}){30})x", "((a{300}){300}){2}"}) {
+    auto t0 = std::chrono::steady_clock::now();
+    auto r = tk::RunNormalizerSpec(NormSpec(p), "aaa");
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+    ASSERT_FALSE(r.ok()) << p;
+    EXPECT_FALSE(tk::IsUnsupported(r.error())) << r.error();
+    EXPECT_LT(ms, 600) << p << " was expanded before it was refused";
+  }
+  EXPECT_TRUE(tk::RunNormalizerSpec(NormSpec("a{1000}b{1000}"), "ab").ok()) << "a large but ordinary repeat still loads";
+  auto deep = [](size_t n) { return std::string(n, '(') + "a" + std::string(n, ')'); };
+  EXPECT_EQ(tk::RunNormalizerSpec(NormSpec(deep(100)), "baab").value(), "b__b") << "the crate gives b__b";
+  EXPECT_TRUE(tk::RunNormalizerSpec(NormSpec(deep(256)), "a").ok());
+  EXPECT_FALSE(tk::RunNormalizerSpec(NormSpec(deep(257)), "a").ok());
+  EXPECT_FALSE(tk::RunNormalizerSpec(NormSpec(deep(200000)), "a").ok()) << "was a stack overflow";
+  std::string siblings;
+  for (int i = 0; i < 300; i++) siblings += "(a)";
+  EXPECT_EQ(tk::RunNormalizerSpec(NormSpec(siblings), "a").value(), "a") << "groups side by side are not nested";
+  std::string wide;
+  for (int i = 0; i < 60000; i++) wide += "a|";
+  EXPECT_FALSE(tk::RunNormalizerSpec(NormSpec(wide + "b"), "a").ok()) << "120000 instructions";
+}
+
+TEST(TokenizerRegex, ReplaceAllIsLinearInTheText) {
+  std::string text(400000, 'a');
+  auto t0 = std::chrono::steady_clock::now();
+  auto r = tk::RunNormalizerSpec(NormSpec("a"), text);
+  auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+  ASSERT_TRUE(r.ok());
+  EXPECT_EQ(r.value(), std::string(400000, '_'));
+  EXPECT_LT(ms, 3000) << "a table sized by the whole text was allocated per match";
+}
+
+TEST(TokenizerRegex, SparseTableAgreesWithTheCrate) {
+  // A program big enough that (instruction x position) exceeds the dense table uses the sparse one.
+  std::string big(100000, 'b');
+  auto s = tk::RunNormalizerSpec(NormSpec("(x{1000}y{1000}z{1000}|b)"), big + "x");
+  ASSERT_TRUE(s.ok()) << s.error();
+  EXPECT_EQ(s.value(), std::string(100000, '_') + "x");
+  // Without the memo this is exponential, and it must also hold on the sparse table.
+  auto fib = tk::RunNormalizerSpec(NormSpec("(a|aa)+b|x{1000}y{1000}z{1000}"), std::string(5000, 'a') + std::string(95000, 'c') + "x");
+  ASSERT_TRUE(fib.ok()) << fib.error();
+  EXPECT_EQ(fib.value(), std::string(5000, 'a') + std::string(95000, 'c') + "x");
+  // Matches after the first share the table; each must still be found.
+  EXPECT_EQ(tk::RunNormalizerSpec(NormSpec("a+?b?|b"), "aab ab b").value(), "__ _ _");
+}
+
+TEST(TokenizerRegex, CaseInsensitiveMatchesTheCrateOrIsRefused) {
+  auto run = [](const std::string& pattern, const std::string& in) {
+    auto r = tk::RunNormalizerSpec(NormSpec(pattern), in);
+    EXPECT_TRUE(r.ok()) << pattern << ": " << r.error();
+    return r.ok() ? r.value() : std::string("<error>");
+  };
+  EXPECT_EQ(run("(?i)[a-c]+", "AbCd"), "_d");
+  EXPECT_EQ(run("(?i)[^a-c]", "aBcD"), "aBc_");
+  EXPECT_EQ(run("(?i)[A-C]", "abcABC"), "______");
+  EXPECT_EQ(run("(?i)x[a-c]y", "XAY xcY xdy"), "_ _ xdy");
+  EXPECT_EQ(run("(?i)q|Z", "qQzZ"), "____");
+  // The crate folds U+212A (Kelvin) to k, U+017F and U+00DF to s and ss, and ligatures to letter pairs.
+  for (const char* p : {"(?i)k", "(?i)K", "(?i)ss", "(?i)[a-z]", "(?i)[^k]", "(?i)f", "(?i)fi", "(?i)(?:s)t", "(?i)[k-k]"}) {
+    auto r = tk::RunNormalizerSpec(NormSpec(p), "a");
+    ASSERT_FALSE(r.ok()) << p;
+    EXPECT_TRUE(tk::IsUnsupported(r.error())) << p << ": " << r.error();
+  }
+  EXPECT_EQ(run("k", "kK"), "_K") << "case-sensitive k is not affected";
+  EXPECT_EQ(run("ss", "ssSs"), "_Ss");
+}
+
+TEST(TokenizerPre, MetaspaceFirstPrependsOnlyAtTheStartOfTheInput) {
+  struct Row {
+    const char* scheme;
+    const char* text;
+    Ids32 want;
+  } rows[] = {
+      {"first", "a<m>b c", {26, 0, 28, 1, 26, 2}},  {"first", "<m>b c", {28, 1, 26, 2}},
+      {"first", "b", {26, 1}},                      {"first", " <m>b", {26, 28, 1}},
+      {"first", "<m><m>b", {28, 28, 1}},            {"first", "<m>b<m>c", {28, 1, 28, 2}},
+      {"first", "a<m>b<m>c", {26, 0, 28, 1, 28, 2}},            {"first", "a b<m> c", {26, 0, 26, 1, 28, 26, 2}},
+      {"always", "a<m>b c", {26, 0, 28, 26, 1, 26, 2}}, {"always", "<m>b c", {28, 26, 1, 26, 2}},
+      {"never", "a<m>b c", {0, 28, 1, 26, 2}},      {"never", "b", {1}},
+  };
+  for (const auto& row : rows) {
+    Tokenizer tok = MustParse(MetaspaceSpec(Metaspace(row.scheme)));
+    EXPECT_EQ(tok.Encode(row.text), row.want) << row.scheme << " " << row.text;
+  }
+  // Only the first piece of an earlier split is still at the start.
+  Tokenizer bytes = MustParse(MetaspaceSpec("{\"type\":\"Sequence\",\"pretokenizers\":[{\"type\":\"ByteLevel\",\"add_prefix_space\":false}," +
+                                            Metaspace("first") + "]}"));
+  EXPECT_EQ(bytes.Encode("ab cd"), (Ids32{26, 0, 1, 27, 2, 3}));
+  EXPECT_EQ(bytes.Encode("ab12 cd"), (Ids32{26, 0, 1, 27, 27, 27, 2, 3}));
+  Tokenizer seq = MustParse(MetaspaceSpec("{\"type\":\"Sequence\",\"pretokenizers\":[" + Metaspace("first") + "," + Metaspace("first") + "]}"));
+  EXPECT_EQ(seq.Encode("ab<m>ab"), (Ids32{26, 0, 1, 28, 0, 1}));
+  Tokenizer nosplit = MustParse(MetaspaceSpec(Metaspace("first", false)));
+  EXPECT_EQ(nosplit.Encode("a b<m>c d"), (Ids32{26, 0, 26, 1, 28, 2, 26, 3}));
+  // The normalizer runs on each piece; the second piece is still not at the start.
+  Tokenizer prepend = MustParse(MetaspaceSpec(Metaspace("first"), R"({"type":"Prepend","prepend":"x"})"));
+  EXPECT_EQ(prepend.Encode("a<m>b"), (Ids32{26, 23, 0, 28, 23, 1}));
+  // The crate keys "first" on the original offset, which a normalizer that deletes text changes.
+  auto strip = Tokenizer::Parse(MetaspaceSpec(Metaspace("first"), R"({"type":"Strip","strip_left":true,"strip_right":false})"));
+  ASSERT_FALSE(strip.ok());
+  EXPECT_TRUE(tk::IsUnsupported(strip.error())) << strip.error();
+  EXPECT_TRUE(Tokenizer::Parse(MetaspaceSpec(Metaspace("always"), R"({"type":"Strip","strip_left":true,"strip_right":false})")).ok());
+  auto replace = Tokenizer::Parse(MetaspaceSpec(Metaspace("first"), R"({"type":"Replace","pattern":{"String":"z"},"content":""})"));
+  ASSERT_FALSE(replace.ok());
+  EXPECT_TRUE(tk::IsUnsupported(replace.error())) << replace.error();
+  EXPECT_EQ(MustParse(MetaspaceSpec(Metaspace("first"), R"({"type":"Strip","strip_left":false,"strip_right":true})")).Encode("ab  "),
+            (Ids32{26, 0, 1})) << "a right strip leaves the start alone";
+  // An added token matched in the normalized text: its pieces are still not at the start.
+  std::string normalized_token = MetaspaceSpec(Metaspace("first"));
+  normalized_token.replace(normalized_token.find("\"normalized\":false"), 18, "\"normalized\":true");
+  Tokenizer inner = MustParse(normalized_token);
+  EXPECT_EQ(inner.Encode("a<m>b c"), (Ids32{26, 0, 28, 1, 26, 2}));
+  EXPECT_EQ(inner.Encode("<m>b c"), (Ids32{28, 1, 26, 2}));
+  EXPECT_EQ(inner.Encode(" <m>b"), (Ids32{26, 28, 1}));
+}
+
+TEST(TokenizerPre, MetaspaceLegacyFlagMustAgreeWithTheScheme) {
+  auto spec = [](const std::string& tail) {
+    return MetaspaceSpec("{\"type\":\"Metaspace\",\"replacement\":\"\xE2\x96\x81\"" + tail + "}");
+  };
+  // The crate: false with any scheme but "never" (or none) is an error; true with "never" is accepted.
+  for (const char* tail : {",\"add_prefix_space\":false", ",\"add_prefix_space\":false,\"prepend_scheme\":\"always\"",
+                           ",\"add_prefix_space\":false,\"prepend_scheme\":\"first\""}) {
+    EXPECT_FALSE(Tokenizer::Parse(spec(tail)).ok()) << tail;
+  }
+  EXPECT_EQ(MustParse(spec(",\"add_prefix_space\":false,\"prepend_scheme\":\"never\"")).Encode("ab"), (Ids32{0, 1}));
+  EXPECT_EQ(MustParse(spec(",\"add_prefix_space\":true,\"prepend_scheme\":\"never\"")).Encode("ab"), (Ids32{0, 1}));
+  EXPECT_EQ(MustParse(spec(",\"add_prefix_space\":true")).Encode("ab"), (Ids32{26, 0, 1}));
+  EXPECT_EQ(MustParse(spec("")).Encode("ab"), (Ids32{26, 0, 1}));
+}
+
+TEST(TokenizerAdded, SingleWordFailureSkipsTheWholeLongestHit) {
+  // xyz is single_word, xy is free. The crate drops a longest hit that fails the flank test and resumes
+  // after it, so xy inside "wxyz" is not found.
+  Tokenizer tok = MustParse(ByteLevelSpec(",\"added_tokens\":[" + Tok("xyz", 257, {"single_word"}) + "," + Tok("xy", 258) + "," + Tok("yz", 259) + "]"));
+  struct Row {
+    const char* text;
+    Ids32 want;
+  } rows[] = {
+      {"wxyz", {119, 120, 121, 122}},
+      {"xyz", {257}},
+      {"xyzw xyz", {120, 121, 122, 119, 32, 257}},
+      {"xyzw xy", {120, 121, 122, 119, 32, 258}},
+      {"w xyz w", {119, 32, 257, 32, 119}},
+      {"xyz,wxyz", {257, 44, 119, 120, 121, 122}},
+      {"wxyz yz", {119, 120, 121, 122, 32, 259}},  // yz inside the failed xyz is not found either
+      {"xy", {258}},
+      {"wxy", {119, 258}},
+  };
+  for (const auto& row : rows) EXPECT_EQ(tok.Encode(row.text), row.want) << row.text;
+}
+
+TEST(TokenizerLoader, AddedTokenIdsFollowTheCrate) {
+  // The crate keeps the vocabulary id of an added token already in the vocabulary and numbers the others
+  // from the vocabulary size in file order; the id in the file is not used. Ids that differ are refused.
+  auto load = [](const std::string& tokens) { return Tokenizer::Parse(ByteLevelSpec(",\"added_tokens\":[" + tokens + "]")); };
+  EXPECT_FALSE(load(Tok("ab", 300, {"special"})).ok()) << "ab is vocabulary id 256 in the crate";
+  EXPECT_TRUE(load(Tok("ab", 256, {"special"})).ok());
+  EXPECT_FALSE(load(Tok("<x>", 300)).ok()) << "the crate numbers it 257";
+  EXPECT_FALSE(load(Tok("<x>", 257) + "," + Tok("<y>", 259)).ok()) << "the crate numbers y 258";
+  EXPECT_TRUE(load(Tok("<x>", 257) + "," + Tok("ab", 256) + "," + Tok("<y>", 258)).ok()) << "a vocabulary token takes no new id";
+  auto r = load(Tok("<x>", 300));
+  EXPECT_NE(r.error().find("257"), std::string::npos) << r.error();
+  // The crate needs all five flags as booleans.
+  for (const char* flag : {"special", "lstrip", "rstrip", "single_word", "normalized"}) {
+    std::string entry = Tok("<x>", 257);
+    std::string drop = std::string(",\"") + flag + "\":false";
+    entry.erase(entry.find(drop), drop.size());
+    EXPECT_FALSE(load(entry).ok()) << "missing " << flag;
+    std::string null = Tok("<x>", 257);
+    null.replace(null.find(drop), drop.size(), std::string(",\"") + flag + "\":null");
+    EXPECT_FALSE(load(null).ok()) << "null " << flag;
+  }
+}
+
+TEST(TokenizerLoader, ModelOptionsThePortIgnoresAreRefused) {
+  std::string good = ByteLevelSpec("");
+  auto with = [&](const std::string& field) { return Replace(good, "\"merges\":[\"a b\"]", "\"merges\":[\"a b\"]," + field); };
+  for (const char* f : {"\"end_of_word_suffix\":\"</w>\"", "\"continuing_subword_prefix\":\"##\"", "\"dropout\":0.5", "\"dropout\":0.0"}) {
+    auto r = Tokenizer::Parse(with(f));
+    ASSERT_FALSE(r.ok()) << f;
+    EXPECT_TRUE(tk::IsUnsupported(r.error())) << f;
+  }
+  for (const char* f : {"\"end_of_word_suffix\":\"\"", "\"continuing_subword_prefix\":\"\"", "\"dropout\":null",
+                        "\"end_of_word_suffix\":null", "\"continuing_subword_prefix\":null"}) {
+    EXPECT_TRUE(Tokenizer::Parse(with(f)).ok()) << f << " is the same as absent in the crate";
+  }
+}
+
+TEST(TokenizerLoader, MergesNamingByteOrUnknownTokensAreRefused) {
+  // The crate builds byte-fallback and unknown tokens before merging; this port applies them after.
+  auto spec = [](const char* merge, bool byte_fallback, bool unk) {
+    return std::string("{\"model\":{\"type\":\"BPE\",\"vocab\":{\"a\":0,\"b\":1,\"ab\":2,\"<0x61>\":3,\"<unk>\":4,\"<0x61>a\":5,\"a<unk>\":6},") +
+           "\"merges\":[\"a b\"," + merge + "],\"byte_fallback\":" + (byte_fallback ? "true" : "false") +
+           (unk ? ",\"unk_token\":\"<unk>\"" : "") + "}}";
+  };
+  auto byte_merge = spec("\"<0x61> a\"", true, false);
+  auto r = Tokenizer::Parse(byte_merge);
+  ASSERT_FALSE(r.ok());
+  EXPECT_TRUE(tk::IsUnsupported(r.error())) << r.error();
+  auto unk_merge = Tokenizer::Parse(spec("\"a <unk>\"", false, true));
+  ASSERT_FALSE(unk_merge.ok());
+  EXPECT_TRUE(tk::IsUnsupported(unk_merge.error())) << unk_merge.error();
+  EXPECT_TRUE(Tokenizer::Parse(spec("\"<0x61> a\"", false, true)).ok()) << "a byte-shaped name is ordinary without byte_fallback";
+  EXPECT_TRUE(Tokenizer::Parse(spec("\"a <unk>\"", true, false)).ok()) << "<unk> is ordinary when it is not the unknown token";
+  EXPECT_TRUE(Tokenizer::Parse(spec("\"a b\"", true, true)).ok());
+  // A merge that produces a byte token is just as unsound.
+  auto produces = Tokenizer::Parse(
+      "{\"model\":{\"type\":\"BPE\",\"vocab\":{\"a\":0,\"<0x6\":1,\"1>\":2,\"<0x61>\":3},\"merges\":[\"<0x6 1>\"],\"byte_fallback\":true}}");
+  ASSERT_FALSE(produces.ok());
+  EXPECT_TRUE(tk::IsUnsupported(produces.error())) << produces.error();
+}
+
+// Three or more branches left stale jump targets (so "a|a|a|b" matched the empty string), and each `|`
+// inserted into the program, which made a long alternation quadratic.
+TEST(TokenizerRegex, ManyBranchAlternation) {
+  auto run = [](const std::string& pattern, const std::string& in) {
+    auto r = tk::RunNormalizerSpec(NormSpec(pattern), in);
+    EXPECT_TRUE(r.ok()) << pattern << ": " << r.error();
+    return r.ok() ? r.value() : std::string("<error>");
+  };
+  EXPECT_EQ(run("a|bc|d|e", "abcdexbd"), "____xb_");
+  EXPECT_EQ(run("(a|b|c)+d", "abcd bd cad"), "_ _ _");
+  EXPECT_EQ(run("x(a|b|c|d)y|z", "xcy xey z"), "_ xey _");
+  EXPECT_EQ(run("a|a|a|b", "cab"), "c__");
+  std::string wide;
+  for (int i = 0; i < 20000; i++) wide += "a|";
+  auto t0 = std::chrono::steady_clock::now();
+  EXPECT_EQ(run(wide + "b", "cab"), "c__");
+  auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+  EXPECT_LT(ms, 3000);
 }

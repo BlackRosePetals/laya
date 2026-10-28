@@ -282,9 +282,10 @@ class Regex {
   std::string ReplaceAll(const std::string& text, const std::string& content) const {
     std::string out;
     size_t copied = 0, from = 0;
+    Memo memo(prog_.size(), text.size() + 1);
     while (from <= text.size()) {
       size_t ms, me;
-      if (!Find(text, from, &ms, &me)) break;
+      if (!Find(text, from, &ms, &me, memo)) break;
       out.append(text, copied, ms - copied);
       out += content;
       copied = me;
@@ -295,7 +296,8 @@ class Regex {
   }
   bool MatchesEmpty() const {
     size_t s, e;
-    return Find("", 0, &s, &e);
+    Memo memo(prog_.size(), 1);
+    return Find("", 0, &s, &e, memo);
   }
 
  private:
@@ -312,6 +314,36 @@ class Regex {
   std::vector<Inst> prog_;
   std::vector<Set> sets_;
 
+  static constexpr size_t kMaxProgram = 100000;  // instructions after repeats are expanded
+  static constexpr int kMaxDepth = 256;          // nested groups
+  static constexpr size_t kDenseBits = size_t(1) << 28;
+  int depth_ = 0;
+
+  // The (instruction, position) states already tried. Dense while the table is small, a hash set above
+  // that. One table serves a whole ReplaceAll: a state that failed still fails for any later start, and
+  // the states of a match lie at or before its end, which no later (non-empty) match revisits.
+  class Memo {
+   public:
+    Memo(size_t insts, size_t positions) : insts_(insts), dense_(insts * positions <= kDenseBits) {
+      if (dense_) bits_.assign((insts * positions + 63) / 64, 0);
+    }
+    bool Visit(int pc, size_t pos) {  // true the first time
+      size_t key = pos * insts_ + size_t(pc);
+      if (!dense_) return sparse_.insert(key).second;
+      uint64_t& w = bits_[key / 64];
+      uint64_t bit = uint64_t(1) << (key % 64);
+      if (w & bit) return false;
+      w |= bit;
+      return true;
+    }
+
+   private:
+    size_t insts_;
+    bool dense_;
+    std::vector<uint64_t> bits_;
+    std::unordered_set<size_t> sparse_;
+  };
+
   // --- parser: pattern -> instructions, emitted directly from a recursive descent -------------
   std::vector<char32_t> p_;
   size_t at_ = 0;
@@ -320,6 +352,7 @@ class Regex {
   bool More() const { return at_ < p_.size(); }
   char32_t Peek() const { return p_[at_]; }
   int Emit(Op op, char32_t c = 0, int x = 0, int y = 0) {
+    if (prog_.size() >= kMaxProgram) Refuse("a Replace regex that compiles to more than 100000 instructions");
     prog_.push_back(Inst{op, c, x, y});
     return int(prog_.size()) - 1;
   }
@@ -341,34 +374,24 @@ class Regex {
     }
   }
 
+  // Each branch starts with a placeholder split (a plain jump for the last one), so no instruction is
+  // ever inserted and every target stays valid.
   void Alternation() {
-    int start = int(prog_.size());
-    Concatenation();
     std::vector<int> jumps;
-    while (More() && Peek() == '|') {
-      at_++;
-      // split(start of the left branches, next), the left branch jumps over the right.
-      prog_.insert(prog_.begin() + start, Inst{kSplit, 0, 0, 0});
-      Shift(start, 1);
-      int j = Emit(kJmp);
-      jumps.push_back(j);
-      prog_[size_t(start)].x = start + 1;
-      prog_[size_t(start)].y = int(prog_.size());
+    while (true) {
+      int split = Emit(kSplit);
       Concatenation();
+      if (More() && Peek() == '|') {
+        at_++;
+        jumps.push_back(Emit(kJmp));  // the finished branch jumps over the rest
+        prog_[size_t(split)].x = split + 1;
+        prog_[size_t(split)].y = int(prog_.size());
+        continue;
+      }
+      prog_[size_t(split)] = Inst{kJmp, 0, split + 1, 0};
+      break;
     }
     for (int j : jumps) prog_[size_t(j)].x = int(prog_.size());
-  }
-
-  // Inserting an instruction at `from` moves everything after it, so targets at or past `from`
-  // that were emitted before the insertion move by `by`.
-  void Shift(int from, int by) {
-    for (size_t i = size_t(from) + 1; i < prog_.size(); i++) {  // [from] is the inserted instruction
-      Inst& in = prog_[i];
-      if (in.op == kSplit || in.op == kJmp) {
-        if (in.x >= from) in.x += by;
-        if (in.op == kSplit && in.y >= from) in.y += by;
-      }
-    }
   }
 
   void Concatenation() {
@@ -406,6 +429,7 @@ class Regex {
       prog_.resize(size_t(start));
       if (lo > 1000 || hi > 1000) Refuse("a Replace regex repeat count above 1000");
       auto copy = [&]() {
+        if (prog_.size() + body.size() > kMaxProgram) Refuse("a Replace regex that compiles to more than 100000 instructions");
         int base = int(prog_.size());
         for (Inst in : body) {
           if (in.op == kSplit || in.op == kJmp) {
@@ -492,7 +516,9 @@ class Regex {
         if (at_ + 1 < p_.size() && p_[at_ + 1] == ':') at_ += 2;
         else Unsupported("this Replace regex group syntax (?...) is not implemented");
       }
+      if (++depth_ > kMaxDepth) Refuse("a Replace regex nested more than 256 groups deep");
       Alternation();
+      depth_--;
       if (!More() || Peek() != ')') Refuse("a Replace normalizer's regex: missing )");
       at_++;
     } else if (c == '[') {
@@ -533,7 +559,17 @@ class Regex {
     Unsupported("the Replace regex escape \\" + std::string(1, char(c < 0x80 ? c : '?')) + " is not implemented");
   }
 
+  // Oniguruma folds with full Unicode rules: K (Kelvin) is k, the long s and the sharp s are s/ss, and
+  // the ligatures ff, fi, fl, ffi, ffl, st fold to letter pairs. An ASCII-only fold would differ.
+  void FoldTrap(char32_t lo, char32_t hi) const {
+    if (!icase_) return;
+    for (char32_t t : {U'k', U'K', U's', U'S', U'f', U'F'}) {
+      if (lo <= t && t <= hi) Unsupported("a case-insensitive Replace regex with k, s or f, whose Unicode case folding is not implemented");
+    }
+  }
+
   void Literal(char32_t c) {
+    FoldTrap(c, c);
     if (icase_ && ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'))) {
       Set s;
       s.ranges = {{c | 0x20, c | 0x20}, {c & ~char32_t(0x20), c & ~char32_t(0x20)}};
@@ -567,6 +603,7 @@ class Regex {
         hi = h == '\\' ? Escape() : (at_++, h);
         if (hi < lo) Refuse("a Replace normalizer's regex: a range with its ends reversed");
       }
+      FoldTrap(lo, hi);
       s.ranges.push_back({lo, hi});
     }
     if (icase_) {
@@ -585,9 +622,7 @@ class Regex {
   }
 
   // --- matcher --------------------------------------------------------------------------------
-  bool Find(const std::string& text, size_t from, size_t* ms, size_t* me) const {
-    size_t width = text.size() + 1;
-    std::vector<bool> seen(prog_.size() * width, false);
+  bool Find(const std::string& text, size_t from, size_t* ms, size_t* me, Memo& seen) const {
     std::vector<std::pair<int, size_t>> stack;
     for (size_t start = from; start <= text.size();) {
       stack.assign(1, {0, start});
@@ -595,9 +630,7 @@ class Regex {
         auto [pc, pos] = stack.back();
         stack.pop_back();
         while (true) {
-          size_t key = size_t(pc) * width + pos;
-          if (seen[key]) break;
-          seen[key] = true;
+          if (!seen.Visit(pc, pos)) break;
           const Inst& in = prog_[size_t(pc)];
           if (in.op == kMatch) {
             *ms = start;
@@ -707,7 +740,7 @@ std::string ReplaceAllLiteral(const std::string& s, const std::string& from, con
   return out;
 }
 
-Normalizer ParseNormalizer(const Value* n) {
+Normalizer ParseNormalizer(const Value* n, bool* may_drop = nullptr) {
   if (n == nullptr || n->is_null()) return [](const std::string& s) { return s; };
   std::string kind = TypeOf(*n, "normalizer");
   if (kind == "NFC") return [](const std::string& s) { return NormalizeImpl(s, Form::NFC); };
@@ -721,9 +754,11 @@ Normalizer ParseNormalizer(const Value* n) {
   }
   if (kind == "Strip") {
     bool l = Bool(*n, "strip_left", true), r = Bool(*n, "strip_right", true);
+    if (l && may_drop != nullptr) *may_drop = true;
     return [l, r](const std::string& s) { return StripImpl(s, l, r); };
   }
   if (kind == "Replace") {
+    if (may_drop != nullptr) *may_drop = true;
     const Value& pattern = Object(*n, "pattern");
     const Value* content = n->Find("content");
     if (content == nullptr || content->kind() != Value::Kind::String) Refuse("a Replace normalizer must declare content");
@@ -750,7 +785,7 @@ Normalizer ParseNormalizer(const Value* n) {
     std::vector<Normalizer> steps;
     for (const Value& child : Array(*n, "normalizers").items()) {
       if (child.kind() != Value::Kind::Object) Refuse("a normalizer in a Sequence must be an object");
-      steps.push_back(ParseNormalizer(&child));
+      steps.push_back(ParseNormalizer(&child, may_drop));
     }
     return [steps](const std::string& s) {
       std::string cur = s;
@@ -792,12 +827,14 @@ const Alphabet& TheAlphabet() {
 class PreTokenizer {
  public:
   virtual ~PreTokenizer() = default;
-  virtual void Split(std::string_view text, std::vector<std::string>& out) const = 0;
+  // `origin`: the text starts where the input did (not after an added token).
+  virtual void Split(std::string_view text, std::vector<std::string>& out, bool origin) const = 0;
+  virtual bool PrependsFirstOnly() const { return false; }
 };
 
 class WholeText : public PreTokenizer {
  public:
-  void Split(std::string_view text, std::vector<std::string>& out) const override {
+  void Split(std::string_view text, std::vector<std::string>& out, bool) const override {
     if (!text.empty()) out.emplace_back(text);
   }
 };
@@ -805,7 +842,7 @@ class WholeText : public PreTokenizer {
 class ByteLevel : public PreTokenizer {
  public:
   ByteLevel(bool prefix, bool regex) : add_prefix_space_(prefix), use_regex_(regex) {}
-  void Split(std::string_view text, std::vector<std::string>& out) const override {
+  void Split(std::string_view text, std::vector<std::string>& out, bool) const override {
     if (text.empty()) return;
     std::string source(text);
     if (add_prefix_space_ && source[0] != ' ') source = " " + source;
@@ -874,12 +911,13 @@ class ByteLevel : public PreTokenizer {
 
 class Metaspace : public PreTokenizer {
  public:
-  Metaspace(std::string replacement, bool prepend, bool split)
-      : replacement_(std::move(replacement)), prepend_(prepend), split_(split) {}
-  void Split(std::string_view text, std::vector<std::string>& out) const override {
+  Metaspace(std::string replacement, bool prepend, bool first_only, bool split)
+      : replacement_(std::move(replacement)), prepend_(prepend), first_only_(first_only), split_(split) {}
+  bool PrependsFirstOnly() const override { return prepend_ && first_only_; }
+  void Split(std::string_view text, std::vector<std::string>& out, bool origin) const override {
     if (text.empty()) return;
     std::string source = ReplaceAllLiteral(std::string(text), " ", replacement_);
-    if (prepend_ && source.compare(0, replacement_.size(), replacement_) != 0) source = replacement_ + source;
+    if (prepend_ && (origin || !first_only_) && source.compare(0, replacement_.size(), replacement_) != 0) source = replacement_ + source;
     if (!split_) {
       out.push_back(source);
       return;
@@ -898,17 +936,24 @@ class Metaspace : public PreTokenizer {
 
  private:
   std::string replacement_;
-  bool prepend_, split_;
+  bool prepend_, first_only_, split_;
 };
 
 class SequencePre : public PreTokenizer {
  public:
   std::vector<std::unique_ptr<PreTokenizer>> steps;
-  void Split(std::string_view text, std::vector<std::string>& out) const override {
+  bool PrependsFirstOnly() const override {
+    for (const auto& step : steps) {
+      if (step->PrependsFirstOnly()) return true;
+    }
+    return false;
+  }
+  void Split(std::string_view text, std::vector<std::string>& out, bool origin) const override {
     std::vector<std::string> current{std::string(text)};
     for (const auto& step : steps) {
       std::vector<std::string> next;
-      for (const auto& piece : current) step->Split(piece, next);
+      // Every pre-tokenizer here keeps the text whole, so only the first piece is still at the start.
+      for (size_t i = 0; i < current.size(); i++) step->Split(current[i], next, origin && i == 0);
       current.swap(next);
     }
     out.insert(out.end(), current.begin(), current.end());
@@ -924,8 +969,13 @@ std::unique_ptr<PreTokenizer> ParsePreTokenizer(const Value* n) {
     if (ud::RuneCount(replacement) != 1) Refuse("a Metaspace replacement must be exactly one code point");
     std::string scheme = Str(*n, "prepend_scheme", "always");
     bool split = Bool(*n, "split", true);
-    if (scheme == "always" || scheme == "first") return std::make_unique<Metaspace>(replacement, true, split);
-    if (scheme == "never") return std::make_unique<Metaspace>(replacement, false, split);
+    // The legacy flag must agree with the scheme, as in the crate (true with "never" is accepted).
+    if (!Bool(*n, "add_prefix_space", true) && scheme != "never") {
+      Refuse("a Metaspace add_prefix_space does not match its declared prepend_scheme");
+    }
+    if (scheme == "always") return std::make_unique<Metaspace>(replacement, true, false, split);
+    if (scheme == "first") return std::make_unique<Metaspace>(replacement, true, true, split);
+    if (scheme == "never") return std::make_unique<Metaspace>(replacement, false, false, split);
     Refuse("unknown Metaspace prepend_scheme \"" + scheme + "\"");
   }
   if (kind == "Sequence") {
@@ -1124,6 +1174,7 @@ struct Span {
   std::string text;
   int32_t id = 0;
   bool is_token = false;
+  size_t offset = 0;  // byte offset of the span in the text that was cut
 };
 
 // The added tokens that start with one character, longest first (the reference's leftmost-longest
@@ -1166,13 +1217,18 @@ class AddedVocab {
     std::vector<Span> out;
     if (text.empty()) return out;
     if (empty) {
-      out.push_back(Span{text, 0, false});
+      out.push_back(Span{text, 0, false, 0});
       return out;
     }
     size_t plain_from = 0;
     for (size_t at = 0; at < text.size();) {
       auto d = ud::DecodeRune(std::string_view(text).substr(at));
-      const AddedToken* hit = LongestAt(text, at, d.rune, d.width);
+      size_t skip = 0;
+      const AddedToken* hit = LongestAt(text, at, d.rune, d.width, &skip);
+      if (skip != 0) {  // the crate skips a longest hit that fails single_word, shorter tokens inside it too
+        at += skip;
+        continue;
+      }
       if (hit == nullptr) {
         at += d.width;
         continue;
@@ -1192,11 +1248,11 @@ class AddedVocab {
           stop += nx.width;
         }
       }
-      if (start > plain_from) out.push_back(Span{text.substr(plain_from, start - plain_from), 0, false});
-      out.push_back(Span{hit->content, hit->id, true});
+      if (start > plain_from) out.push_back(Span{text.substr(plain_from, start - plain_from), 0, false, plain_from});
+      out.push_back(Span{hit->content, hit->id, true, start});
       plain_from = at = stop;
     }
-    if (plain_from < text.size()) out.push_back(Span{text.substr(plain_from), 0, false});
+    if (plain_from < text.size()) out.push_back(Span{text.substr(plain_from), 0, false, plain_from});
     return out;
   }
 
@@ -1206,7 +1262,8 @@ class AddedVocab {
     auto it = other_.find(r);
     return it == other_.end() ? nullptr : &it->second;
   }
-  const AddedToken* LongestAt(const std::string& text, size_t at, char32_t first, size_t width) const {
+  // `skip` is set to the length of a longest hit that fails single_word.
+  const AddedToken* LongestAt(const std::string& text, size_t at, char32_t first, size_t width, size_t* skip) const {
     const Bucket* b = BucketOf(first);
     if (b == nullptr || b->tokens.empty()) return nullptr;
     if (!b->whole) {
@@ -1215,7 +1272,10 @@ class AddedVocab {
     }
     for (const AddedToken* t : b->tokens) {
       if (text.compare(at, t->content.size(), t->content) != 0) continue;
-      if (t->single_word && !StandsAlone(text, at, at + t->content.size())) continue;
+      if (t->single_word && !StandsAlone(text, at, at + t->content.size())) {
+        *skip = t->content.size();
+        return nullptr;
+      }
       return t;
     }
     return nullptr;
@@ -1279,6 +1339,13 @@ class Bpe {
       if (merged == vocab.end()) {
         Refuse("merge at rank " + std::to_string(rank) + " produces \"" + pair.first + pair.second +
                "\", which the vocabulary does not contain");
+      }
+      // The crate builds byte-fallback and unknown tokens before merging; this port applies them after.
+      for (const std::string* name : {&pair.first, &pair.second, &merged->first}) {
+        unsigned char b;
+        if ((byte_fallback && ByteToken(*name, &b)) || (unk != nullptr && *name == *unk)) {
+          Unsupported("merge at rank " + std::to_string(rank) + " names the byte or unknown token \"" + *name + "\"");
+        }
       }
       merges_.emplace(PairKey(l->second, r->second), MergeRule{int32_t(rank), merged->second});  // the lowest rank wins
     }
@@ -1517,8 +1584,13 @@ std::shared_ptr<const Impl> Build(std::string_view tokenizer_json, const Value* 
                 "\". Refusing to load rather than mis-tokenize silently");
   }
   auto impl = std::make_shared<Impl>();
-  impl->normalizer = ParseNormalizer(Member(doc, "normalizer"));
+  bool normalizer_may_drop = false;
+  impl->normalizer = ParseNormalizer(Member(doc, "normalizer"), &normalizer_may_drop);
   impl->pre = ParsePreTokenizer(Member(doc, "pre_tokenizer"));
+  if (normalizer_may_drop && impl->pre->PrependsFirstOnly()) {
+    // The crate decides "first" by the original offset of the normalized text, which this port does not track.
+    Unsupported("a Metaspace prepend_scheme \"first\" after a normalizer that can delete leading text (Strip, Replace)");
+  }
   impl->decoder = ParseDecoder(Member(doc, "decoder"));
   impl->byte_level_only = dynamic_cast<const ByteLevel*>(impl->pre.get()) != nullptr;
 
@@ -1541,6 +1613,12 @@ std::shared_ptr<const Impl> Build(std::string_view tokenizer_json, const Value* 
         Refuse("added token id " + std::to_string(i) + " is claimed by both \"" + clash->second + "\" and \"" + content + "\"");
       }
       seen[i] = content;
+      for (const char* flag : {"special", "lstrip", "rstrip", "single_word", "normalized"}) {
+        const Value* f = r.Find(flag);
+        if (f == nullptr || f->kind() != Value::Kind::Bool) {
+          Refuse("added token \"" + content + "\" must declare " + flag + " as a boolean");
+        }
+      }
       added.push_back(AddedToken{content, i, Bool(r, "special", false), Bool(r, "lstrip", false), Bool(r, "rstrip", false),
                                  Bool(r, "single_word", false), Bool(r, "normalized", false)});
     }
@@ -1554,6 +1632,18 @@ std::shared_ptr<const Impl> Build(std::string_view tokenizer_json, const Value* 
     if (v.kind() != Value::Kind::Int || v.as_int() > INT32_MAX) Refuse("the vocabulary holds an id that is not an integer");
     if (v.as_int() < 0) Refuse("the vocabulary holds a negative id " + std::to_string(v.as_int()));
     vocab[vocab_v->key(i)] = int32_t(v.as_int());
+  }
+  {
+    int32_t next = int32_t(vocab.size());
+    for (auto& tok : added) {
+      auto known = vocab.find(tok.content);
+      int32_t expect = known != vocab.end() ? known->second : next++;
+      if (known == vocab.end()) vocab[tok.content] = expect;
+      if (tok.id != expect) {
+        Refuse("added token \"" + tok.content + "\" declares id " + std::to_string(tok.id) + ", but the reference gives it " +
+               std::to_string(expect) + " (its vocabulary id, or the next free id in file order)");
+      }
+    }
   }
   for (const auto& tok : added) {
     if (tok.special) {
@@ -1580,6 +1670,13 @@ std::shared_ptr<const Impl> Build(std::string_view tokenizer_json, const Value* 
 
   std::vector<std::pair<std::string, std::string>> merges;
   ReadMerges(model, merges);
+  for (const char* key : {"end_of_word_suffix", "continuing_subword_prefix"}) {
+    const Value* v = Member(model, key);
+    if (v != nullptr && v->kind() == Value::Kind::String && !v->as_string().empty()) {
+      Unsupported(std::string("model.") + key + " is not implemented");
+    }
+  }
+  if (Member(model, "dropout") != nullptr) Unsupported("model.dropout is not implemented");
   std::string unk;
   const Value* unk_v = Member(model, "unk_token");
   if (unk_v != nullptr && unk_v->kind() != Value::Kind::String) Refuse("model.unk_token must be a string or null");
@@ -1689,9 +1786,9 @@ std::vector<int32_t> Tokenizer::Encode(std::string_view text_in, int64_t limit) 
   std::string text = ud::ToValid(text_in);  // a Python str is always valid
   out.reserve(size_t(limit > 0 && limit < int64_t(text.size() / 3 + 16) ? limit : int64_t(text.size() / 3 + 16)));
   auto full = [&]() { return limit >= 0 && int64_t(out.size()) >= limit; };
-  auto plain = [&](const std::string& s) {
+  auto plain = [&](const std::string& s, bool origin) {
     std::vector<std::string> pieces;
-    t.pre->Split(s, pieces);
+    t.pre->Split(s, pieces, origin);
     for (const auto& piece : pieces) {
       if (full()) return;
       t.bpe->EncodePiece(piece, out);
@@ -1704,14 +1801,15 @@ std::vector<int32_t> Tokenizer::Encode(std::string_view text_in, int64_t limit) 
       continue;
     }
     std::string normalized = t.normalizer(sp.text);
+    bool origin = sp.offset == 0;  // only the text at the start of the input is "first"
     if (t.normal_added.empty) {
-      plain(normalized);
+      plain(normalized, origin);
       continue;
     }
     for (const Span& inner : t.normal_added.Split(normalized)) {
       if (full()) break;
       if (inner.is_token) out.push_back(inner.id);
-      else plain(inner.text);
+      else plain(inner.text, origin && inner.offset == 0);
     }
   }
   if (limit >= 0 && int64_t(out.size()) > limit) out.resize(size_t(limit));
@@ -1768,7 +1866,7 @@ std::string Tokenizer::MaskToken() const { return impl_->mask_token; }
 size_t Tokenizer::CountMergeDisagreements(std::string_view text, size_t* pieces_checked) const {
   size_t bad = 0;
   std::vector<std::string> pieces;
-  impl_->pre->Split(impl_->normalizer(ud::ToValid(text)), pieces);
+  impl_->pre->Split(impl_->normalizer(ud::ToValid(text)), pieces, true);
   for (const auto& p : pieces) {
     if (!impl_->bpe->StrategiesAgree(p)) bad++;
     if (pieces_checked != nullptr) (*pieces_checked)++;
@@ -1779,7 +1877,7 @@ size_t Tokenizer::CountMergeDisagreements(std::string_view text, size_t* pieces_
 std::string Tokenizer::NormalizeForTest(std::string_view text) const { return impl_->normalizer(ud::ToValid(text)); }
 std::vector<std::string> Tokenizer::PreTokenizeForTest(std::string_view normalized) const {
   std::vector<std::string> out;
-  impl_->pre->Split(normalized, out);
+  impl_->pre->Split(normalized, out, true);
   return out;
 }
 
@@ -1801,7 +1899,7 @@ Result<std::vector<std::string>> RunPreTokenizerSpec(std::string_view spec_json,
     auto v = pyvalue::Parse(spec_json);
     if (!v.ok()) return Result<std::vector<std::string>>::Fail(v.error());
     std::vector<std::string> out;
-    ParsePreTokenizer(&v.value())->Split(input, out);
+    ParsePreTokenizer(&v.value())->Split(input, out, true);
     return Result<std::vector<std::string>>::Ok(out);
   } catch (const Fail& f) {
     return Result<std::vector<std::string>>::Fail(f.msg);

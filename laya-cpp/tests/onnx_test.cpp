@@ -338,6 +338,20 @@ std::string Need(const char* var) {
 std::mutex g_agents_mu;
 std::map<std::string, std::unique_ptr<laya::agent::Agent>> g_agents;
 
+// The agents hold ONNX Runtime sessions, which must be closed before static destruction begins: the
+// runtime's statics may already be gone by then, and an agent still open at exit aborted some
+// asan/tsan processes after their tests passed ("recursive_mutex lock failed"). Close is the
+// supported way to end a session held in a static.
+class CloseAgents : public ::testing::Environment {
+ public:
+  void TearDown() override {
+    std::lock_guard<std::mutex> lock(g_agents_mu);
+    for (auto& kv : g_agents) EXPECT_EQ(kv.second->Close(), "");
+    g_agents.clear();
+  }
+};
+const ::testing::Environment* const g_close_agents = ::testing::AddGlobalTestEnvironment(new CloseAgents);
+
 // One agent per checkpoint for the whole process; the tests only read it.
 laya::agent::Agent* Shared(const Rig& rig, const std::string& graph, const std::string& dir) {
   auto& agents = g_agents;

@@ -315,6 +315,19 @@ def test_tournament_is_refused_before_remote_requests(serve, n):
     assert FakeServe.requests == []
 
 
+@pytest.mark.parametrize("model", ["auto", "english"])
+def test_predict_long_is_refused_before_remote_requests(monkeypatch, serve, model):
+    # laya-serve has no long-state endpoint, so the scan has nowhere to run. Without this refusal
+    # the call reached Router.predict_long and came back as internal_error ("hooks are callables").
+    monkeypatch.setattr(mcp_server, "_ROUTER", RemoteRouter(serve))
+    with pytest.raises(Exception) as info:
+        mcp_server.laya_predict_long_tool({"text": "x"}, _questions(), model=model)
+    payload = json.loads(str(info.value))
+    assert payload["error"] == "unsupported_remote", payload
+    assert "laya_predict" in payload["message"] and "LAYA_BASE_URL" in payload["message"]
+    assert FakeServe.requests == []
+
+
 def test_server_builds_a_remote_router_from_the_environment(monkeypatch, serve):
     monkeypatch.setenv("LAYA_BASE_URL", serve + "/")
     monkeypatch.setenv("LAYA_API_KEY", "k")
@@ -448,7 +461,7 @@ def test_remote_mcp_startup_and_every_tool_avoid_torch(serve):
         for call in calls:
             out = json.loads(call())
             assert "error" not in out, out
-        for tool in (server.laya_shortlist_tool, server.laya_tournament_tool):
+        for tool in (server.laya_shortlist_tool, server.laya_tournament_tool, server.laya_predict_long_tool):
             try:
                 tool(state, questions)
             except Exception as exc:

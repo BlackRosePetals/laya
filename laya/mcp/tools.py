@@ -988,6 +988,14 @@ def laya_predict_long(
     Each answer carries the deciding window's ``window`` attribution (index and token offsets
     into the tokenized state), and ``windows`` counts the windows the model scored.
     """
+    if router is not None and agent is None and hasattr(router, "base_url") and hasattr(router, "health"):
+        raise ToolError(
+            "unsupported_remote",
+            "laya_predict_long scans the state window by window in-process; laya-serve has no "
+            "long-state endpoint, so it is not available when LAYA_BASE_URL points at laya-serve. "
+            "Run the MCP server without LAYA_BASE_URL to scan locally, or use laya_predict, which "
+            "answers from the first window only.",
+        )
     state_d = validate_state(state)
     questions_d = validate_questions(questions)
     model_name = validate_model(model)

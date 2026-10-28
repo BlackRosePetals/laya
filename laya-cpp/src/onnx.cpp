@@ -17,13 +17,15 @@ namespace laya {
 namespace onnx {
 namespace {
 
-// One Ort::Env per process, leaked on purpose. A session or agent may be held in a static whose
-// destructor runs after any Env destructor would have, and ORT's own statics may already be gone;
-// never destroying the Env means no destruction order can fault. The logging level is FATAL so a
-// refused run is reported only through its Result.
+// One Ort::Env per process, a function-local static. It is built on the first Open, after the
+// runtime's own statics, so it is destroyed before them: leaking it instead (tried first) leaves a
+// live OrtEnv while the runtime's statics die and aborts at exit ("recursive_mutex lock failed",
+// 5 of 6 TSan runs of CloseInterruptsARunInFlight/english, 0 of 4 with this static). A Session or
+// Agent a user holds in a static is destroyed after it, which the static-holder test pins. The
+// logging level is FATAL so a refused run is reported only through its Result.
 Ort::Env& SharedEnv() {
-  static Ort::Env* const env = new Ort::Env(ORT_LOGGING_LEVEL_FATAL, "laya");
-  return *env;
+  static Ort::Env env(ORT_LOGGING_LEVEL_FATAL, "laya");
+  return env;
 }
 
 std::string Dtype(ONNXTensorElementDataType t) {

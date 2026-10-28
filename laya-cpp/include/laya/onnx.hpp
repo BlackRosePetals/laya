@@ -25,8 +25,8 @@ std::string RuntimeVersion();
 // A Session over one fused laya.onnx (+ laya.onnx.data beside it). Checks the graph's inputs and
 // outputs at once. Run is thread-safe and stops in flight when its CancelToken fires (kCancelled).
 // Close is idempotent, refuses new runs, terminates the runs in flight and returns once they have
-// left. A Session or Agent may be held in a static: the process-wide ONNX Runtime environment is
-// never destroyed. No exception leaves this API.
+// left. A Session or Agent may be held in a static: the process-wide ONNX Runtime environment is a
+// static built on the first Open and does not need the session. No exception leaves this API.
 Result<std::unique_ptr<infer::Session>> Open(const std::string& graph_path, const Options& options = {});
 
 }  // namespace onnx

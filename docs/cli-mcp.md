@@ -353,8 +353,10 @@ Each Router keeps the value resolved at construction; environment changes requir
 or a restarted MCP process. An explicit request header also takes precedence over a UA set on
 a custom urllib opener; use this setting instead of that workaround.
 
-`laya_shortlist`, `laya_tournament`, and prediction hook overrides return `unsupported_remote`, since these
-paths run in the model process. For shared-server tournament selection, enable
+`laya_shortlist`, `laya_tournament`, `laya_predict_long`, and prediction hook overrides return
+`unsupported_remote`, since these paths run in the model process. The HTTP server has no long-state
+scan, so for a state past one window run the MCP server without `LAYA_BASE_URL`; `laya_predict`
+over HTTP reads the first window only. For shared-server tournament selection, enable
 [`LAYA_TOURNAMENT_GROUP` on the HTTP server](http-api.md#large-choices-laya_tournament_group) and call
 `laya_predict`: HTTP keeps probabilities for every original label (zero for eliminated labels),
 reports `x_tournament`, and counts usage across rounds. The in-process `laya_tournament` returns

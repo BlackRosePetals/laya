@@ -109,6 +109,61 @@ describe("structured/projection", () => {
       { type: "object", properties: { x: { enum: ["a", null] } } });
     expect(v.x).toBe(null);
   });
+
+  // Mirrors the non-dict-answer block in tests/test_structured.py. The answers this port projects
+  // come from parsed remote JSON, so a field's entry can be a string, number, boolean, array or
+  // null instead of an answer object. Python skips those (`isinstance(answer, dict)`) and omits the
+  // field, as it omits an absent answer; `answer == null` let a primitive through and each field
+  // read invented a value for it -- "undefined" for a choice, `minimum + 0` for a score, false for
+  // a noul, measured across 4 fields x 6 shapes against `laya/structured.py`.
+  const EXPECTED_VALUES: Record<string, unknown> = {
+    department: "billing", urgency: 2, needs_human: true, priority: 2,
+  };
+  const FIELDS = Object.keys(EXPECTED_VALUES);
+  const NON_OBJECT: Array<[string, unknown]> = [
+    ["string", "oops"],
+    ["list", ["not", "an", "answer"]],
+    ["int", 7],
+    ["float", 0.5],
+    ["bool", true],
+    ["null", null],
+  ];
+  for (const [label, body] of NON_OBJECT) {
+    it(`omits a non-object answer (${label}) and still projects the fields beside it`, () => {
+      for (const field of FIELDS) {
+        const values = answersToJson({ ...ANSWERS, [field]: body } as any, SCHEMA);
+        expect(Object.prototype.hasOwnProperty.call(values, field)).toBe(false);
+        for (const other of FIELDS.filter((f) => f !== field)) {
+          expect(values[other]).toEqual(EXPECTED_VALUES[other]);
+        }
+      }
+    });
+  }
+  it("all answers non-object yields no values", () => {
+    expect(answersToJson({ department: 5, urgency: "x" } as any, SCHEMA)).toEqual({});
+  });
+
+  // The same entry reaches `decide` through a runner, not only through answersToJson, and
+  // `returnDetails` walks it a second time to build the per-field maps. Python omits it from all
+  // four (`values`, `confidence`, `answer_confidence`, `probabilities`); the unguarded loop added a
+  // confidence of 0.0 for a question that was never answered.
+  const fakeRunner = (answers: Record<string, any>) => ({
+    async predict() {
+      return { model: "fake", answers: JSON.parse(JSON.stringify(answers)) };
+    },
+  });
+  for (const [label, body] of NON_OBJECT) {
+    it(`decide omits a non-object answer (${label}) from the details too`, async () => {
+      const det = await decide(fakeRunner({ ...ANSWERS, department: body }), "s", SCHEMA, {
+        returnDetails: true,
+      }) as any;
+      for (const map of ["values", "confidence", "answerConfidence", "probabilities"]) {
+        expect(Object.prototype.hasOwnProperty.call(det[map], "department")).toBe(false);
+      }
+      expect(det.values.urgency).toBe(2);
+      expect(det.confidence.needs_human).toBe(0.8);
+    });
+  }
 });
 
 describe("structured/rejections", () => {

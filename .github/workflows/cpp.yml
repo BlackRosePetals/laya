@@ -42,7 +42,7 @@ concurrency:
 env:
   # The test floor: the number of ctest tests laya-cpp registers (the GoogleTest cases plus
   # compile_flags). Raise it with every test added.
-  MIN_TESTS: "365"
+  MIN_TESTS: "409"
   GOLDENS: ${{ github.workspace }}/.cpp-goldens
   LAYA_GOLDENS: ${{ github.workspace }}/.cpp-goldens
   LAYA_CHECKPOINTS: ${{ github.workspace }}/laya-java/.work/checkpoints   # the tokenizer tests need both shipped checkpoints
@@ -93,7 +93,7 @@ jobs:
           LAYA_FIXTURE_CHECKPOINTS: ${{ github.workspace }}/laya-java/.work/checkpoints
           PYTHONPATH: ${{ github.workspace }}
         run: |
-          python laya-java/scripts/gen_fixtures.py --strict --out "$GOLDENS" --only lang_tables.json --only lang_detect.json --only python_json.json --only tokenizer_ids.json --only decode_text.json --only sequences.json --only window_plan.json
+          python laya-java/scripts/gen_fixtures.py --strict --out "$GOLDENS" --only lang_tables.json --only lang_detect.json --only python_json.json --only tokenizer_ids.json --only decode_text.json --only sequences.json --only window_plan.json --only decode.json
           python laya-go/scripts/gen_go_fixtures.py --out "$GOLDENS"
       - name: Compiled C++ tables match CPython
         env:

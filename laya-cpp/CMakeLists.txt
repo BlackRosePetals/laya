@@ -26,7 +26,7 @@ function(laya_target_flags target)
 endfunction()
 
 add_library(laya src/version.cpp src/sha256.cpp src/unicodedata.cpp src/pyjson.cpp src/pyvalue.cpp src/lang.cpp
-  src/tokenizer.cpp src/schema.cpp src/sequence.cpp)
+  src/tokenizer.cpp src/schema.cpp src/sequence.cpp src/decode.cpp src/infer.cpp src/collate.cpp src/agent.cpp)
 target_include_directories(laya PUBLIC include)
 laya_target_flags(laya)
 
@@ -46,7 +46,7 @@ if(LAYA_BUILD_TESTS)
 
   enable_testing()
   add_executable(laya_tests tests/version_test.cpp tests/foundation_test.cpp tests/lang_test.cpp tests/hardening_test.cpp
-  tests/tokenizer_test.cpp tests/schema_test.cpp tests/sequence_test.cpp)
+  tests/tokenizer_test.cpp tests/schema_test.cpp tests/sequence_test.cpp tests/decode_test.cpp tests/agent_test.cpp)
   target_link_libraries(laya_tests PRIVATE laya GTest::gtest_main)
   laya_target_flags(laya_tests)
 

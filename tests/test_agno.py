@@ -891,6 +891,37 @@ for _body, _label in _AGNO_NESTED_ROUTE:
         except Exception as exc:
             check_true("nested/%s/route is RuntimeError" % _label, False, type(exc).__name__)
 
+# A `choice` may name an index the team does not have. `chosen_key` is remote JSON and `agents` is
+# the caller's list, and `agent_N` was parsed straight into `agents[N]`: `agent_99` raised a bare
+# IndexError out of the routing decision and `agent_-1` wrapped to the LAST agent -- a route no
+# caller asked for and nothing in the decision names. `tools.py:493` answers an unknown decision by
+# name instead of raising, so the index range is checked the same way here.
+_AGNO_CHOICE_INDEX = ["agent_5", "agent_99", "agent_-1", "agent_-99"]
+for _choice in _AGNO_CHOICE_INDEX:
+    with patch("urllib.request.build_opener") as _m:
+        _m.return_value.open.return_value = DummyHTTPResponse(
+            {"answers": {"delegation": {"choice": _choice, "answer_confidence": 0.95}}})
+        try:
+            _d = LayaAgnoRouter(base_url="http://localhost:8000").route(
+                "Write a Python function to reverse a string", agents)
+            check_true("choice-index/%s/route raises" % _choice, False,
+                       "no error raised (routed to index %r)" % (_d.agent_index,))
+        except RuntimeError as exc:
+            check_true("choice-index/%s/route malformed" % _choice,
+                       "Malformed decision response" in str(exc))
+            check_true("choice-index/%s/route names the choice" % _choice, _choice in str(exc))
+            check_true("choice-index/%s/route names the team size" % _choice, "5-agent" in str(exc))
+        except Exception as exc:
+            check_true("choice-index/%s/route is RuntimeError" % _choice, False, type(exc).__name__)
+
+# The last real index still routes: the guard is a range check, not a rejection of the highest one.
+with patch("urllib.request.build_opener") as _m:
+    _m.return_value.open.return_value = DummyHTTPResponse(
+        {"answers": {"delegation": {"choice": "agent_4", "answer_confidence": 0.95}}})
+    check("choice-index/last agent still routes",
+          LayaAgnoRouter(base_url="http://localhost:8000").route(
+              "Write a Python function to reverse a string", agents).agent_index, 4)
+
 _AGNO_NESTED_SCREEN = [
     ({"answers": []}, "answers-list"),
     ({"answers": {"harm_severity": "nope"}}, "answer-str"),

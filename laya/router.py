@@ -891,6 +891,18 @@ class Router(HookRegistry):
         if source is not None and not isinstance(source, (str, tuple, list)):
             raise TypeError("checkpoint source for %r must be a repo id, a local path or a (repo, subfolder) "
                             "pair, got %s" % (name, type(source).__name__))
+        # The sequence half of that sentence was never opened. `_split` pads with one `None`, so an
+        # empty pair unpacks to one value and `registered`, `route(model=...)` and `load()` all fail
+        # later with `ValueError: not enough values to unpack (expected 2, got 1)` -- after the
+        # registration reported success -- while a third element is silently truncated and a number
+        # part is stringified into a repo id like `acme/5`. Refuse the shape here, where the name is
+        # known, so nothing is stored and no later call has to guess what the pair meant.
+        if isinstance(source, (tuple, list)) and (
+                not 1 <= len(source) <= 2
+                or not all(part is None or isinstance(part, str) for part in source)
+                or not any(isinstance(part, str) for part in source)):
+            raise TypeError("checkpoint source for %r must be a repo id, a local path or a (repo, subfolder) "
+                            "pair of strings, got %r" % (name, source))
         if isinstance(source, str) and source.startswith("~"):
             source = os.path.expanduser(source)     # a local path, never a Hub repo id
         # After every check that can refuse the registration, and before the write. A filter

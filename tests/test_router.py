@@ -1854,6 +1854,24 @@ try:
 except TypeError:
     check("register/a source must be a path, repo or pair", True, True)
 
+# The pair half of that sentence was unchecked, and an empty one is the worst case: `register`
+# reported success, stored the spec, and `registered` / `route(model=...)` / `load()` then raised
+# `ValueError: not enough values to unpack (expected 2, got 1)` from `_split` on every later call.
+for bad_source, why in (([], "empty pair"), (["a", "b", "c"], "three parts"),
+                        ((None, None), "a pair naming no repo"),
+                        (("acme/laya-tone", 5), "a number among the parts")):
+    _r = Router()
+    try:
+        _r.register("tone", bad_source)
+        check("register/refuses %s" % why, False, True)
+    except TypeError as _e:
+        check("register/refuses %s" % why, "'tone'" in str(_e), True)
+    check("register/%s stores nothing" % why, "tone" in _r.registered, False)
+for good in (("acme/laya-tone", None), ["org/repo", "folder"], ("only-repo",)):
+    check("register/still accepts %r" % (good,),
+          Router(models={"tone": good}).registered["tone"]["source"],
+          "/".join([p for p in (good if isinstance(good, list) else list(good)) if p is not None]))
+
 # Every name-taking option accepts a registered name, the way it accepts a built-in one.
 r3 = Router(models={"papers": "/tmp/laya-papers"}, revisions={"papers": "abc123"}, default="papers",
             sha256_digests={"papers": {"model.safetensors": "a" * 64}})

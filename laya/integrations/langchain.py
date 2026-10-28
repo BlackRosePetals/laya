@@ -36,6 +36,8 @@ from ._controls import predict_kwargs as _predict_kwargs
 from ._controls import reject_remote_hooks as _reject_remote_hooks
 from ._controls import reject_remote_lang_guess as _reject_remote_lang_guess
 from ._controls import require_router_controls as _require_router_controls, router_kwargs as _router_kwargs
+from ._guard import answer_number as _answer_number
+from ._guard import answers_map as _answers_map
 from ._guard import score_violation_probability as _score_violation_probability
 
 
@@ -719,16 +721,26 @@ class LayaGuardrail(_BatchedRunnable, RunnableSerializable):
 
     def _finish(self, result: Dict[str, Any], input: Any) -> Any:
         """Apply the violation scan and the configured action to one decision."""
-        answers = result.get("answers", {})
+        # A remote body is arbitrary JSON, so `answers` and each answer are checked before anything
+        # is read out of them -- the same two levels and the same `noul` check `LayaTaskGuard.screen`
+        # and `LayaAgentRouter.screen` already delegate to `_guard`. `result.get("answers", {})` only
+        # defaults when the key is ABSENT: a body whose answer is a string (`{"jailbreak": "nope"}`)
+        # raised AttributeError at `ans.get("type")`, a `noul` of `"high"` or `null` raised TypeError
+        # from `>=`, and a `{"type": "noul"}` with no `noul` at all raised KeyError at `ans["noul"]`
+        # whenever the threshold let the comparison through.
+        where = f"Laya server at {self.base_url}" if self.base_url else "Laya"
+        answers = _answers_map(result, where)
 
         violations: Dict[str, Any] = {}
         for qid, ans in answers.items():
             t = ans.get("type")
-            if t == "noul" and ans.get("noul", 0.0) >= self.threshold:
-                violations[qid] = {
-                    "probability": ans["noul"],
-                    "confidence": ans.get("confidence", 0.0),
-                }
+            if t == "noul":
+                probability = _answer_number(ans, "noul", where)
+                if probability >= self.threshold:
+                    violations[qid] = {
+                        "probability": probability,
+                        "confidence": ans.get("confidence", 0.0),
+                    }
             elif t == "score":
                 # `score` is the expected level (0..k-1), not a probability: gate on the
                 # probability that the level is at or above the middle of the scale.
@@ -900,15 +912,25 @@ class LayaTriage(_BatchedRunnable, RunnableSerializable):
 
     def _finish(self, result: Dict[str, Any], state: Any) -> Dict[str, Any]:
         """Project one triage decision onto the graph state."""
-        ans = result.get("answers", {})
+        # Three levels of the same body are read here, and only the first was checked: `answers`
+        # itself (a list raised AttributeError at `.get`), the answer under each question id (a
+        # string raised AttributeError at the nested `.get`), and the `noul` inside it (a `"0.9"` or
+        # `null` raised TypeError from `>=`, a `true` read as 1.0 because bool subclasses int, and a
+        # NaN compared False -- i.e. silently "not urgent"). `_answers_map` validates the first two
+        # and `_answer_number` the third, the way the guardrail screens two lines above do.
+        where = f"Laya server at {self.base_url}" if self.base_url else "Laya"
+        ans = _answers_map(result, where)
+
+        def _noul(qid: str) -> float:
+            return _answer_number(ans.get(qid, {}), "noul", where)
 
         triage_info = {
             "intent": ans.get("intent", {}).get("choice"),
             "intent_confidence": ans.get("intent", {}).get("confidence"),
-            "is_urgent": ans.get("is_urgent", {}).get("noul", 0.0) >= 0.5,
+            "is_urgent": _noul("is_urgent") >= 0.5,
             "frustration_score": ans.get("frustration", {}).get("score"),
-            "churn_risk": ans.get("churn_risk", {}).get("noul", 0.0) >= 0.5,
-            "refund_requested": ans.get("refund_requested", {}).get("noul", 0.0) >= 0.5,
+            "churn_risk": _noul("churn_risk") >= 0.5,
+            "refund_requested": _noul("refund_requested") >= 0.5,
         }
 
         if isinstance(state, dict):

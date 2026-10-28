@@ -11,7 +11,9 @@ pytest.importorskip("mcp")
 from mcp.server.mcpserver.exceptions import ToolError as McpToolError  # noqa: E402
 from laya import BaseHook, Router  # noqa: E402
 from laya.mcp import server as server_mod  # noqa: E402
-from laya.mcp.tools import ToolError, laya_predict, laya_route, laya_tournament  # noqa: E402
+from laya.mcp.tools import (  # noqa: E402
+    ToolError, laya_predict, laya_route, laya_route_batch, laya_tournament,
+)
 
 
 STATE = {"message": "Turn lights off"}
@@ -216,4 +218,179 @@ def test_real_mcp_parser_rejects_non_boolean_without_dispatch(bad, monkeypatch):
     monkeypatch.setattr(server_mod, "_ROUTER", router)
     with pytest.raises(McpToolError, match="explain"):
         _call_tool({"state": STATE, "questions": QUESTIONS, "explain": bad})
+    assert router.calls == []
+
+
+class LegacyBatchRouter:
+    def __init__(self):
+        self.batch_calls = []
+
+    def route_batch(self, requests):
+        self.batch_calls.append(requests)
+        return [dict(ROUTING) for _ in requests]
+
+
+class RecordingBatchRouter(RecordingRouter):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.batch_calls = []
+
+    def route_batch(self, requests, **kwargs):
+        self.batch_calls.append((requests, dict(kwargs)))
+        return super().route_batch(requests, **kwargs)
+
+
+def _batch_requests():
+    return [{"state": copy.deepcopy(STATE), "questions": copy.deepcopy(QUESTIONS)},
+            {"state": {"message": "xyzzy frobnitz quux blorb"}, "questions": copy.deepcopy(QUESTIONS)}]
+
+
+def _call_batch_tool(arguments):
+    result = asyncio.run(server_mod.server.call_tool("laya_route_batch", arguments))
+    assert not result.is_error
+    return json.loads(result.content[0].text)
+
+
+@pytest.mark.parametrize("flag", [{}, {"explain": False}])
+def test_batch_default_preserves_legacy_router_and_exact_output(flag):
+    router = LegacyBatchRouter()
+    out = laya_route_batch(_batch_requests(), router=router, **flag)
+    expected = {"decisions": [dict(ROUTING), dict(ROUTING)], "model_counts": {"english": 2}}
+    assert json.dumps(out) == json.dumps(expected)
+    assert len(router.batch_calls) == 1
+
+
+def test_batch_diagnostics_preserve_order_overrides_and_model_counts():
+    router = RecordingBatchRouter()
+    requests = _batch_requests()
+    requests[1]["lang"] = "de"
+    requests.append({"state": copy.deepcopy(STATE), "questions": copy.deepcopy(QUESTIONS), "model": "english"})
+    requests.append({"state": {"note": "This is an English note about the order. " * 20,
+                               "payload": {"customer": "Ich kann mich nicht anmelden und brauche Hilfe"}},
+                     "questions": copy.deepcopy(QUESTIONS)})
+    original = copy.deepcopy(requests)
+    plain = laya_route_batch(requests, router=router)
+    explained = laya_route_batch(requests, router=router, explain=True)
+    assert [d.pop("diagnostic") for d in explained["decisions"]] == [
+        DIAGNOSTIC, None, None,
+        {"stage": "segment", "reason": "named_segment",
+         "source": {"leaf_index": 1, "path": ["payload", "customer"], "line": 1}},
+    ]
+    assert explained == plain
+    assert [d["model"] for d in explained["decisions"]] == ["multilingual", "multilingual", "english", "multilingual"]
+    assert explained["model_counts"] == {"multilingual": 3, "english": 1}
+    assert router.batch_calls[0][1] == {}
+    assert router.batch_calls[1][1] == {"explain": True}
+    assert len(router.calls) == 2 * len(requests)
+    assert requests == original
+
+
+def test_batch_uses_each_final_hook_decision_and_preserves_hooks_timeout():
+    class ReplaceSecondRoute(BaseHook):
+        def on_route(self, ctx):
+            if ctx.states[0]["message"].startswith("xyzzy"):
+                ctx.decision = dict(ROUTING)
+
+    router = RecordingBatchRouter(hooks=[ReplaceSecondRoute()])
+    out = laya_route_batch(_batch_requests(), hooks_timeout=2.5, router=router, explain=True)
+    assert out["decisions"][0]["diagnostic"] == DIAGNOSTIC
+    assert out["decisions"][1] == dict(ROUTING, diagnostic=None)
+    assert out["model_counts"] == {"multilingual": 1, "english": 1}
+    assert router.batch_calls[0][1] == {"hooks_timeout": 2.5, "explain": True}
+    assert len(router.batch_calls) == 1
+    assert len(router.calls) == 2
+    assert all(call[2]["hooks_timeout"] == 2.5 for call in router.calls)
+    assert all(call[2]["explain"] is True for call in router.calls)
+
+
+@pytest.mark.parametrize("bad", [None, 0, "false"])
+def test_batch_rejects_non_boolean_before_dispatch(bad):
+    router = RecordingBatchRouter()
+    with pytest.raises(ToolError, match="explain") as info:
+        laya_route_batch(_batch_requests(), router=router, explain=bad)
+    assert info.value.code == "invalid_explain"
+    assert router.batch_calls == []
+    assert router.calls == []
+
+
+def test_batch_legacy_router_refuses_explanation_without_fallback():
+    router = LegacyBatchRouter()
+    with pytest.raises(ToolError, match="explain") as info:
+        laya_route_batch(_batch_requests(), router=router, explain=True)
+    assert info.value.code == "unsupported_explain"
+    assert router.batch_calls == []
+
+
+def test_batch_internal_type_error_is_not_relabelled_or_retried():
+    error = TypeError("wrapped.route_batch() got an unexpected keyword argument 'explain'")
+
+    class BrokenBatchRouter:
+        calls = 0
+
+        def route_batch(self, requests, **kwargs):
+            self.calls += 1
+            raise error
+
+    router = BrokenBatchRouter()
+    with pytest.raises(TypeError) as info:
+        laya_route_batch(_batch_requests(), router=router, explain=True)
+    assert info.value is error
+    assert router.calls == 1
+
+
+@pytest.mark.parametrize("decisions", [[], [dict(ROUTING)], tuple([dict(ROUTING)] * 2)])
+def test_explained_batch_preserves_result_cardinality_validation(decisions):
+    class InvalidBatchRouter:
+        def route_batch(self, requests, *, explain=False):
+            assert explain is True
+            return decisions
+
+    with pytest.raises(ToolError) as info:
+        laya_route_batch(_batch_requests(), router=InvalidBatchRouter(), explain=True)
+    assert info.value.code == "internal_error"
+
+
+def test_explained_batch_preserves_timeout_validation_before_dispatch():
+    router = RecordingBatchRouter()
+    with pytest.raises(ToolError) as info:
+        laya_route_batch(_batch_requests(), hooks_timeout=True, router=router, explain=True)
+    assert info.value.code == "invalid_hooks_timeout"
+    assert router.batch_calls == []
+
+
+def test_mcp_batch_schema_exposes_optional_boolean_explain():
+    tool = next(t for t in asyncio.run(server_mod.server.list_tools()) if t.name == "laya_route_batch")
+    schema = tool.input_schema
+    assert schema["properties"]["explain"]["type"] == "boolean"
+    assert schema["properties"]["explain"]["default"] is False
+    assert schema["required"] == ["requests"]
+
+
+@pytest.mark.parametrize(("flag", "timeout", "expected_kwargs"), [
+    ({}, {}, {}),
+    ({"explain": False}, {}, {}),
+    ({"explain": True}, {}, {"explain": True}),
+    ({"explain": True}, {"hooks_timeout": 2.5}, {"explain": True, "hooks_timeout": 2.5}),
+])
+def test_real_mcp_batch_calls_honor_explain_and_timeout(flag, timeout, expected_kwargs, monkeypatch):
+    router = RecordingBatchRouter()
+    monkeypatch.setattr(server_mod, "_ROUTER", router)
+    out = _call_batch_tool({"requests": _batch_requests(), **flag, **timeout})
+    if flag.get("explain", False):
+        assert [d["diagnostic"]["reason"] for d in out["decisions"]] == ["insufficient_words", "no_language_evidence"]
+    else:
+        assert all(set(d) == {"model", "repo", "reason"} for d in out["decisions"])
+    assert out["model_counts"] == {"multilingual": 2}
+    assert len(router.batch_calls) == 1
+    assert router.batch_calls[0][1] == expected_kwargs
+    assert len(router.calls) == 2
+
+
+@pytest.mark.parametrize("bad", [None, 1, "false"])
+def test_real_mcp_batch_parser_rejects_non_boolean_before_dispatch(bad, monkeypatch):
+    router = RecordingBatchRouter()
+    monkeypatch.setattr(server_mod, "_ROUTER", router)
+    with pytest.raises(McpToolError, match="explain"):
+        _call_batch_tool({"requests": _batch_requests(), "explain": bad})
+    assert router.batch_calls == []
     assert router.calls == []

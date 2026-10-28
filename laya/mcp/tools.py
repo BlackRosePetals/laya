@@ -1455,7 +1455,7 @@ def laya_predict_batch(
     }
 
 
-def laya_route_batch(requests: Any, hooks_timeout: Any = None, *, router: Any = None) -> dict:
+def laya_route_batch(requests: Any, hooks_timeout: Any = None, *, explain: Any = False, router: Any = None) -> dict:
     """Routing decisions for many requests: no forward pass, no checkpoint loads.
 
     The batch form of ``laya_route``, mirroring ``Router.route_batch``: it
@@ -1464,22 +1464,25 @@ def laya_route_batch(requests: Any, hooks_timeout: Any = None, *, router: Any = 
     ``hooks_timeout`` overrides the Router's own value for this call's
     ``on_route`` dispatch, exactly as it does for ``laya_predict_batch``: an
     operator-installed hook that hangs should not stall a whole routing sweep.
+    ``explain=True`` adds a diagnostic (or ``None``) to each final decision,
+    using the same contract as ``laya_route`` and preserving input order.
     """
+    explain = _validate_explain(explain)
     items = validate_batch_requests(requests)
     timeout = _validate_hooks_timeout(hooks_timeout)
     if router is None:
         raise ToolError("models_not_ready", "Router is not loaded")
     if not hasattr(router, "route_batch"):
         raise ToolError("internal_error", "router has no route_batch() method")
-    decisions = router.route_batch(items, hooks_timeout=timeout) if timeout is not None \
-        else router.route_batch(items)
+    overrides = {"hooks_timeout": timeout} if timeout is not None else {}
+    decisions = _call_route(router.route_batch, items, explain=explain, **overrides)
     if not isinstance(decisions, list) or len(decisions) != len(items):
         raise ToolError(
             "internal_error",
             "route_batch returned %r decisions for %d requests" % (
                 len(decisions) if isinstance(decisions, list) else type(decisions).__name__, len(items)),
         )
-    out = [_decision_to_dict(decision) for decision in decisions]
+    out = [_route_to_dict(decision, explain=explain) for decision in decisions]
     model_counts: dict[str, int] = {}
     for entry in out:
         name = entry["model"]

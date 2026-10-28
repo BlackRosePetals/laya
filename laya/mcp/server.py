@@ -394,14 +394,16 @@ def laya_predict_batch_tool(requests: list, batch_size: int = 0, hooks_timeout: 
         + batch_item_key_doc(omit=("max_len", "head_max_len")) + ". Use this to "
         "inspect or aggregate the routing of a workload before paying model-load cost. "
         "Returns one {model, repo, reason} decision per request in input order, plus "
-        "model_counts. hooks_timeout: positive number or unset -- override the "
+        "model_counts. explain=true adds each final decision's language diagnostic, or null; "
+        "defaults to false. In shared-server mode this is local routing evidence, not the HTTP "
+        "server's prediction. hooks_timeout: positive number or unset -- override the "
         "Router's own hook deadline for this sweep's on_route dispatch, so a slow "
         "or hung operator hook cannot stall a routing pass the caller only wants "
         "the checkpoint labels for. "
         + _GUARDRAILS
     ),
 )
-def laya_route_batch_tool(requests: list, hooks_timeout: float = 0) -> str:
+def laya_route_batch_tool(requests: list, hooks_timeout: float = 0, explain: StrictBool = False) -> str:
     """Route many requests to checkpoints without a forward pass."""
     router = _router_or_error()
     # hooks_timeout=0 means "unset": MCP clients send defaults eagerly, and
@@ -414,6 +416,7 @@ def laya_route_batch_tool(requests: list, hooks_timeout: float = 0) -> str:
         laya_route_batch,
         requests=requests,
         hooks_timeout=hooks_timeout,
+        explain=explain,
         router=router,
     )
 

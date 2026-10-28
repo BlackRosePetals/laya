@@ -402,11 +402,17 @@ def test_remote_decide_and_preset_use_the_server(serve):
         assert info.value.code == "busy"
 
 
-def test_remote_route_tools_do_not_contact_the_server(serve):
+@pytest.mark.parametrize("explain", [False, True])
+def test_remote_route_tools_do_not_contact_the_server(serve, explain):
     router = RemoteRouter(serve)
     state = {"text": "Mein Konto wurde zweimal belastet"}
-    assert laya_route(state, _questions(), router=router)["model"] == "multilingual"
-    assert laya_route_batch([{"state": state, "questions": _questions()}], router=router)["decisions"][0]["model"] == "multilingual"
+    single = laya_route(state, _questions(), router=router, explain=explain)
+    batch = laya_route_batch([{"state": state, "questions": _questions()}], router=router, explain=explain)
+    assert single["model"] == "multilingual"
+    assert batch == {"decisions": [single], "model_counts": {"multilingual": 1}}
+    assert ("diagnostic" in single) is explain
+    if explain:
+        assert set(single["diagnostic"]) == {"stage", "reason", "source"}
     assert not FakeServe.requests
 
 
@@ -448,6 +454,18 @@ def test_remote_mcp_startup_and_every_tool_avoid_torch(serve):
         for call in calls:
             out = json.loads(call())
             assert "error" not in out, out
+        # Exercise actual MCP parsing, with both model imports and HTTP forbidden.
+        import asyncio
+        def no_http(*args, **kwargs):
+            raise AssertionError("routing diagnostics attempted an HTTP request")
+        server._ROUTER._request = no_http
+        for name, arguments in (("laya_route", {"state": state, "questions": questions}),
+                                ("laya_route_batch", {"requests": items})):
+            result = asyncio.run(server.server.call_tool(name, dict(arguments, explain=True)))
+            assert not result.is_error, result
+            out = json.loads(result.content[0].text)
+            decisions = out["decisions"] if name == "laya_route_batch" else [out]
+            assert all(set(d["diagnostic"]) == {"stage", "reason", "source"} for d in decisions)
         for tool in (server.laya_shortlist_tool, server.laya_tournament_tool):
             try:
                 tool(state, questions)

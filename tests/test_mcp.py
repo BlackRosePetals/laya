@@ -1616,6 +1616,51 @@ def test_route_batch_tool_hooks_timeout_forwarding():
                       "invalid_hooks_timeout")
 
 
+def test_batch_unknown_task_is_invalid_task():
+    """An unpinned batch `task` that names no checkpoint is `invalid_task`, as on `laya_route`.
+
+    The batch validator only checked that `task` was a non-empty string, so the name reached
+    `Router.route_batch` / `predict_batch`, whose `normalise_name` raised ValueError, and the
+    client got `internal_error`. A pinned model is never routed, so its task is left as it was
+    (`batch/validation_keeps_overrides`); "auto" pins nothing, so its task is checked.
+    """
+    import json
+
+    from laya.mcp import server as server_mod
+    from mcp.server.mcpserver.exceptions import ToolError as McpToolError
+
+    requests = [{"state": STATE, "questions": QUESTIONS},
+                {"state": STATE, "questions": QUESTIONS, "task": "not-a-checkpoint"}]
+    saved = server_mod._ROUTER
+    try:
+        for tool in ("laya_route_batch", "laya_predict_batch"):
+            router = BatchRouter()
+            server_mod._ROUTER = router
+            try:
+                result = asyncio.run(mcp_server.call_tool(tool, {"requests": requests}))
+            except McpToolError as exc:
+                # "Error executing tool <name>: <the wrapper's JSON payload>"
+                payload = json.loads(str(exc).split(": ", 1)[1])
+            else:
+                payload = {"answered": result.content[0].text}
+            ok("batch_task/%s_invalid_task" % tool, payload.get("error") == "invalid_task",
+               repr(payload)[:200])
+            ok("batch_task/%s_names_item" % tool,
+               "requests[1]['task']" in str(payload.get("message")), repr(payload)[:200])
+            ok("batch_task/%s_router_not_called" % tool,
+               router.route_batch_calls == [] and router.predict_batch_calls == [])
+    finally:
+        server_mod._ROUTER = saved
+
+    expect_tool_error("batch_task/auto_model_still_checks_task",
+                      lambda: validate_batch_requests(
+                          [{"state": STATE, "questions": QUESTIONS, "model": "auto",
+                            "task": "not-a-checkpoint"}]),
+                      "invalid_task")
+    out = validate_batch_requests([{"state": STATE, "questions": QUESTIONS, "task": "typed_decisions"}])
+    ok("batch_task/known_task_kept_as_spelled", out[0].get("task") == "typed_decisions", repr(out[0]))
+
+
 # --- decide tool (mocked router, no weights) ----------------------------------
 
 DECIDE_SCHEMA = {
@@ -3417,6 +3462,7 @@ test_batch_predict()
 test_batch_tool_control_forwarding()
 test_batch_route()
 test_route_batch_tool_hooks_timeout_forwarding()
+test_batch_unknown_task_is_invalid_task()
 test_decide()
 test_shortlist_lang_parity()
 test_shortlist_embed_cache()

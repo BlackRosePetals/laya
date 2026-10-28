@@ -1256,6 +1256,13 @@ def _validate_batch_item(request: Any, i: int) -> dict:
     for key in ("task", "lang"):
         if key in request:
             item[key] = _validate_batch_str(request[key], "%s[%r]" % (where, key))
+    # The router reads `task` only when no model is pinned, so that is when a name nothing answers
+    # to must be refused here: past this point it is a ValueError and the client sees internal_error.
+    if "task" in item and "model" not in item:
+        try:
+            validate_task(item["task"])
+        except ToolError as error:
+            raise ToolError("invalid_task", "%s['task']: %s" % (where, error)) from None
     if "lang_guess" in request:
         # Type-check it the way the single-request path does (`validate_lang_guess`), instead of
         # passing it through raw: a non-string (e.g. a JSON object) otherwise reached

@@ -166,6 +166,18 @@ TEST(Labels, PythonDictKeying) {
             "1.0 and True are one key)");
 }
 
+// strtod follows the process locale: under de_DE "1.5" read as 1, so 1.5 and 1 looked like one key.
+TEST(Labels, EqKeyIgnoresACommaDecimalLocale) {
+  laya_test::CommaLocale comma;
+  if (!comma.ok()) GTEST_SKIP() << "no comma-decimal locale installed";
+  using L = sc::Label;
+  EXPECT_NE(L::OfFloat(1.5).EqKey(), L::OfInt(1).EqKey());
+  EXPECT_EQ(L::OfFloat(1.5).EqKey(), "f:1.5");
+  EXPECT_EQ(L::OfFloat(2.0).EqKey(), L::OfInt(2).EqKey());
+  EXPECT_EQ(L::OfFloat(1e22).EqKey(), "n:10000000000000000000000");
+  EXPECT_TRUE(sc::Question::Choice("Pick.", {{L::OfInt(1), Value()}, {L::OfFloat(1.5), Value()}}).ok());
+}
+
 TEST(Questions, Duplicates) {
   auto q = sc::Question::Noul("Holds?").value();
   EXPECT_FALSE(sc::Questions::Of({{"a", q}, {"a", q}}).ok());

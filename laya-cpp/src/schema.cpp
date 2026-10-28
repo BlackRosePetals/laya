@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdlib>
 
+#include "cnum.hpp"
 #include "laya/pyjson.hpp"
 #include "laya/unicodedata.hpp"
 
@@ -202,7 +203,7 @@ std::string Label::EqKey() const {
     case Kind::Float: break;
   }
   if (text_ == "NaN" || text_ == "Infinity" || text_ == "-Infinity") return "n:" + text_;
-  double d = std::strtod(text_.c_str(), nullptr);  // the C locale: the library never changes it
+  double d = cnum::ToDouble(text_);  // text_ is Python-spelled with a dot, whatever the process locale
   if (d == std::trunc(d)) return "n:" + ExactInteger(d);
   return "f:" + text_;  // shortest repr is unique per double
 }

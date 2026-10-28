@@ -42,7 +42,7 @@ concurrency:
 env:
   # The test floor: the number of ctest tests laya-cpp registers (the GoogleTest cases plus
   # compile_flags). Raise it with every test added.
-  MIN_TESTS: "352"
+  MIN_TESTS: "365"
   GOLDENS: ${{ github.workspace }}/.cpp-goldens
   LAYA_GOLDENS: ${{ github.workspace }}/.cpp-goldens
   LAYA_CHECKPOINTS: ${{ github.workspace }}/laya-java/.work/checkpoints   # the tokenizer tests need both shipped checkpoints

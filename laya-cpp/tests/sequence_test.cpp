@@ -278,6 +278,32 @@ TEST(PlanWindows, ClampRatioBoundary) {
   EXPECT_TRUE(found) << "no budget with a default window of twice the room";
 }
 
+// snprintf follows the process locale: under de_DE the ratio read "2,5x".
+TEST(PlanWindows, ClampRatioIgnoresACommaDecimalLocale) {
+  LAYA_CHECKPOINT_TOK(tok, "english");
+  laya_test::CommaLocale comma;
+  if (!comma.ok()) GTEST_SKIP() << "no comma-decimal locale installed";
+  bool found = false;
+  for (int n = 1; n <= 40 && !found; n++) {
+    auto q = WindowQuestion(n);
+    for (int64_t head = 32; head <= 192 && !found; head += 8) {
+      // room = max_len - len(head) - 1 and the default window = max_len - head_max_len - 8, so the
+      // default is 2.5 * room at 3 * max_len = 5 * len(head) - 2 * head_max_len - 11.
+      const int64_t len = int64_t(sq::BuildHead(*tok, q, head).value().ids.size());
+      const int64_t top = 5 * len - 2 * head - 11;
+      if (top <= 0 || top % 3 != 0) continue;
+      sq::Budget b{top / 3, head};
+      auto room = sq::StateRoom(*tok, q, b);
+      if (!room.ok() || room.value() <= 0 || 2 * b.DefaultWindow() != 5 * room.value()) continue;
+      auto plan = sq::PlanWindows(*tok, {q}, b, {});
+      if (!plan.ok() || plan.value().warnings.size() != 1) continue;
+      found = true;
+      EXPECT_NE(plan.value().warnings[0].find("roughly 2.5x as many windows"), std::string::npos) << plan.value().warnings[0];
+    }
+  }
+  EXPECT_TRUE(found) << "no budget with a default window of 2.5 times the room";
+}
+
 TEST(BatchCap, MatchesPythonGrid) {
   LAYA_GOLDEN_LIST(grid, "window_plan.json", "batch_cap");
   LAYA_EXPECT_ROWS(grid, 810);

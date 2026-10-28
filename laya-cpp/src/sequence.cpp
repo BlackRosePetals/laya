@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <set>
 
+#include "cnum.hpp"
 #include "laya/pyjson.hpp"
 
 namespace laya {
@@ -190,11 +191,7 @@ namespace {
 constexpr int64_t kClampWarnRatio = 2;
 constexpr int64_t kBatchBlowup = 2;
 
-std::string Ratio1(double x) {
-  char buf[48];
-  std::snprintf(buf, sizeof buf, "%.1f", x);
-  return buf;
-}
+std::string Ratio1(double x) { return cnum::Fixed(x, 1); }
 }  // namespace
 
 Result<WindowPlan> PlanWindows(const Tokenizer& tok, const std::vector<Question>& questions, const Budget& b,

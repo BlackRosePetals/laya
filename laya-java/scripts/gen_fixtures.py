@@ -1768,9 +1768,6 @@ def decode_answers():
     def row(values):
         return np.asarray(values, dtype=np.float32)
 
-    _LO = np.float32(1e-6)
-    _HI = np.nextafter(_LO, np.float32(1))
-
     # (id, question, option_order, lang, logits)
     cases = [
         ("choice-2", {"t": "choice", "ins": "i", "crit": {"a": "x", "b": "y"}},
@@ -1797,16 +1794,6 @@ def decode_answers():
          None, None, [700.0, 699.0, -700.0]),
         ("choice-tiny-spread", {"t": "choice", "ins": "i", "crit": {"a": "1", "b": "2"}},
          None, None, [1.0, 1.0 + 1e-7]),
-        # Adjacent float32 logits: numpy's float32 exp and sum make p an exact tie, so argmax
-        # takes the first option; a double softmax would pick the larger logit.
-        ("choice-ulp-tie", {"t": "choice", "ins": "i", "crit": {"a": "1", "b": "2"}},
-         None, None, [float(_LO), float(_HI)]),
-        ("choice-ulp-tie-reversed", {"t": "choice", "ins": "i", "crit": {"a": "1", "b": "2"}},
-         None, None, [float(_HI), float(_LO)]),
-        ("choice-ulp-tie-3", {"t": "choice", "ins": "i", "crit": {"a": "1", "b": "2", "c": "3"}},
-         None, None, [float(_LO), float(_HI), float(_HI)]),
-        ("choice-ulp-tie-permuted", {"t": "choice", "ins": "i", "crit": {"a": "1", "b": "2"}},
-         [1, 0], None, [float(_LO), float(_HI)]),
         ("choice-lang-override", {"t": "choice", "ins": "i", "crit": {"a": "1", "b": "2"}},
          None, "zh-Hans", [2.0, 1.0]),
         ("choice-lang-override-prefix", {"t": "choice", "ins": "i", "crit": {"a": "1", "b": "2"}},

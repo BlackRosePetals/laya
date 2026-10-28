@@ -50,7 +50,7 @@ TEST(DecodeGolden, DecodeJson) {
   for (const char* name : kModels) {
     LAYA_GOLDEN_LIST(entry, "decode.json", name);
     const Value* cases = entry->Find("cases");
-    LAYA_EXPECT_ROWS(cases, 24);
+    LAYA_EXPECT_ROWS(cases, 20);
     const dc::Temperatures temps = TempsOf(*entry->Find("config"));
     for (size_t i = 0; i < cases->size(); i++) {
       const Value& rec = cases->value(i);
@@ -345,6 +345,9 @@ TEST(Decode, QuotientTieFallsToTheFirst) {
 }
 
 // numpy keeps exp and the sum in float32, so a logit gap below float32 resolution is an exact tie.
+// Expected values were computed once from ONNXAgent._decode_answers with lo = float32(1e-6),
+// hi = nextafter(lo, 1), T = 1: [lo,hi], [hi,lo], [lo,hi,hi] and [lo,hi] with option_order [1,0] all
+// give p equal (0.5 / 0.3333) and choice "a" (the first option).
 TEST(Decode, SubUlpGapIsAFloat32TieForTheChoice) {
   const float lo = 1e-6f, hi = std::nextafter(lo, 1.0f);
   auto t = Uniform(1);
@@ -354,6 +357,10 @@ TEST(Decode, SubUlpGapIsAFloat32TieForTheChoice) {
   EXPECT_EQ(key(3, {lo, hi, hi}), "o0");
   EXPECT_EQ(key(3, {lo, 5.0f, hi}), "o1");  // a real gap still decides
   EXPECT_EQ(key(3, {-3.0f, lo, hi}), "o1");
+  auto permuted = Pick(2).WithOptionOrder({1, 0}).value();
+  auto a = dc::Decode(permuted, RowOf({lo, hi}), "", &t).value();
+  EXPECT_EQ(a.choice.Key(), "o0");
+  EXPECT_EQ(a.probabilities[0].p, 0.5);
 }
 
 TEST(Decode, FirstMaximumWinsAnExactTie) {

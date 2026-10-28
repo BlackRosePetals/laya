@@ -765,6 +765,29 @@ def test_dataset_rejects_bad_rows(row, fragment):
     assert fragment in str(exc.value)
 
 
+def test_dataset_from_jsonl_reads_a_file_that_starts_with_a_bom(tmp_path):
+    """A dataset saved by Notepad or exported from Excel is the same file with three bytes in front.
+
+    A `utf-8` read leaves that BOM as U+FEFF on line 1, so `json.loads` refused the whole document
+    with `"...:1 is not valid JSON: Unexpected UTF-8 BOM (decode using utf-8-sig)"` -- a refusal
+    that names the fix this reader could have applied itself. `laya/cli.py` (--questions, --batch
+    and stdin), `laya/train.py` and `laya/evidence.py` open a caller's file with `utf-8-sig` for
+    exactly this reason, and the comment in `laya/cli.py` claims "the other file readers in this
+    repo" do too; this was the dataset door that did not.
+    """
+    rows = [
+        json.dumps({"state": "s1", "questions": Q, "expected": {"intent": "a"}, "language": "en"}),
+        "# a comment line",
+        json.dumps({"state": "s2", "questions": Q, "expected": {"intent": "b"}, "tags": ["t"]}),
+    ]
+    path = tmp_path / "bom.jsonl"
+    path.write_text("﻿" + "\n".join(rows), encoding="utf-8")
+    dataset = Dataset.from_jsonl(str(path))
+    assert len(dataset) == 2
+    assert dataset.examples[0].language == "en"
+    assert dataset.examples[1].tags == ("t",)
+
+
 def test_dataset_rejects_malformed_json_and_empty(tmp_path):
     bad = tmp_path / "bad.jsonl"
     bad.write_text("{not json\n", encoding="utf-8")
@@ -2953,6 +2976,30 @@ def test_cli_report_reads_refuse_an_unreadable_report_with_code_2(monkeypatch, t
         assert "Traceback" not in err, "%s under run leaked a traceback: %s" % (label, err)
         assert "cannot read report" in err and path in err, "%s under run: %s" % (label, err)
     monkeypatch.setattr("builtins.open", real_open)
+
+
+def test_load_report_reads_a_file_that_starts_with_a_bom(tmp_path):
+    """The report door is the same door as the dataset one, and had the same three-byte problem.
+
+    `_load_report` opened `utf-8`, so a report re-saved through a Windows editor arrived with a BOM,
+    `json.load` refused it, and the tool answered `cannot read report ... Unexpected UTF-8 BOM
+    (decode using utf-8-sig)` with exit 2 -- a usage error whose own text names the decoding this
+    reader could have asked for. `laya/cli.py` and `laya/evidence.py` open a caller's file with
+    `utf-8-sig` for exactly this reason; the refusal paths above are unchanged, since a BOM is not a
+    file that cannot be read.
+    """
+    from laya import evals_cli
+
+    document = {"overall": {"choice_accuracy": 0.5}, "slices": {}, "cases": []}
+    path = tmp_path / "bom-report.json"
+    path.write_text("﻿" + json.dumps(document), encoding="utf-8")
+    assert evals_cli._load_report(str(path)) == document
+    # Still refused, in the same words, for a document that is not JSON with or without a BOM.
+    broken = tmp_path / "broken.json"
+    broken.write_text("﻿{nope", encoding="utf-8")
+    with pytest.raises(EvalError) as exc:
+        evals_cli._load_report(str(broken))
+    assert "cannot read report" in str(exc.value)
 
 
 def test_cli_dataset_reads_refuse_an_unreadable_dataset_with_code_2(monkeypatch, tmp_path, capsys):

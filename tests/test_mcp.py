@@ -3282,6 +3282,46 @@ def test_server_tournament():
         server_mod._ROUTER = saved
 
 
+def test_server_router_construction_error_is_the_same_on_every_tool():
+    """A router that cannot be built reaches the client as the same JSON on every tool.
+
+    `_router_or_error` turns `_ensure_router`'s ToolError into the payload the wrapper sends; the
+    tournament tool called `_ensure_router` bare, so a bad LAYA_BASE_URL escaped as a raw ToolError
+    and MCP redacted it to "Error executing tool laya_tournament", with no code and no reason.
+    """
+    import json
+
+    from laya.mcp import server as server_mod
+    from mcp.server.mcpserver.exceptions import ToolError as McpToolError
+
+    saved_router, saved_url = server_mod._ROUTER, os.environ.get("LAYA_BASE_URL")
+    os.environ["LAYA_BASE_URL"] = "http://"
+    server_mod._ROUTER = None
+    try:
+        for tool in ("laya_predict", "laya_tournament"):
+            try:
+                asyncio.run(mcp_server.call_tool(tool, {"state": STATE, "questions": tournament_questions(4)}))
+            except McpToolError as exc:
+                # "Error executing tool <name>: <the wrapper's JSON payload>"
+                _, _, raw = str(exc).partition(": ")
+            else:
+                raw = ""
+            try:
+                payload = json.loads(raw)
+            except ValueError:
+                payload = {"raw": raw}
+            ok("server/construction_error_%s_code" % tool, payload.get("error") == "internal_error",
+               repr(payload))
+            ok("server/construction_error_%s_reason" % tool,
+               "remote router construction failed" in str(payload.get("message")), repr(payload))
+    finally:
+        server_mod._ROUTER = saved_router
+        if saved_url is None:
+            os.environ.pop("LAYA_BASE_URL", None)
+        else:
+            os.environ["LAYA_BASE_URL"] = saved_url
+
+
 def test_server_shortlist_k_default():
     """The shortlist tool's advertised `k` default must be `laya.shortlist`'s.
 
@@ -3485,6 +3525,7 @@ test_auto_task_env()
 test_default_model_env()
 test_server_registration()
 test_server_tournament()
+test_server_router_construction_error_is_the_same_on_every_tool()
 test_server_shortlist_k_default()
 test_cli_mcp_page_tool_argument_rows()
 

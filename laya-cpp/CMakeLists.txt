@@ -73,7 +73,17 @@ if(LAYA_BUILD_TESTS)
     target_link_libraries(laya_onnx_tests PRIVATE laya_onnx laya_ort GTest::gtest_main)
     laya_target_flags(laya_onnx_tests)
     laya_ort_runtime_path(laya_onnx_tests)
-    target_compile_definitions(laya_onnx_tests PRIVATE LAYA_ORT_VERSION="${LAYA_ORT_VERSION}")
+    add_executable(laya_onnx_static_holder tests/tools/onnx_static_holder.cpp)
+    target_link_libraries(laya_onnx_static_holder PRIVATE laya_onnx laya_ort)
+    laya_target_flags(laya_onnx_static_holder)
+    laya_ort_runtime_path(laya_onnx_static_holder)
+    add_dependencies(laya_onnx_tests laya_onnx_static_holder)
+    add_executable(laya_c5_cli tests/tools/laya_c5_cli.cpp)
+    target_link_libraries(laya_c5_cli PRIVATE laya_onnx laya_ort)
+    laya_target_flags(laya_c5_cli)
+    laya_ort_runtime_path(laya_c5_cli)
+    target_compile_definitions(laya_onnx_tests PRIVATE LAYA_ORT_VERSION="${LAYA_ORT_VERSION}"
+      LAYA_STATIC_HOLDER="$<TARGET_FILE:laya_onnx_static_holder>")
   endif()
 
   include(GoogleTest)
@@ -82,6 +92,8 @@ if(LAYA_BUILD_TESTS)
 
   if(LAYA_ONNX)
     gtest_discover_tests(laya_onnx_tests DISCOVERY_MODE PRE_TEST DISCOVERY_TIMEOUT 120)
+    # The refusals of cmake/onnxruntime.cmake (wrong version, missing header or library).
+    add_test(NAME ort_root_check COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_ort_root.sh ${LAYA_ORT_ROOT})
   endif()
 
   # Listing must stay cheap (it runs before every ctest): bound it at 3 s with the goldens loaded.

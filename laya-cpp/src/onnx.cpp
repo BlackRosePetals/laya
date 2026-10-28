@@ -3,9 +3,13 @@
 #include <onnxruntime_cxx_api.h>
 
 #include <filesystem>
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <memory>
 #include <mutex>
-#include <shared_mutex>
+#include <set>
+#include <thread>
 
 #include "laya/onnx_graph.hpp"
 
@@ -13,18 +17,13 @@ namespace laya {
 namespace onnx {
 namespace {
 
-// One Ort::Env per process, shared by every session and freed with the last one, so there is no
-// static destructor racing a session's teardown. The mutex orders creation against that release.
-std::shared_ptr<Ort::Env> SharedEnv() {
-  static std::mutex mu;
-  static std::weak_ptr<Ort::Env> weak;
-  std::lock_guard<std::mutex> lock(mu);
-  std::shared_ptr<Ort::Env> env = weak.lock();
-  if (!env) {
-    env = std::make_shared<Ort::Env>(ORT_LOGGING_LEVEL_ERROR, "laya");
-    weak = env;
-  }
-  return env;
+// One Ort::Env per process, leaked on purpose. A session or agent may be held in a static whose
+// destructor runs after any Env destructor would have, and ORT's own statics may already be gone;
+// never destroying the Env means no destruction order can fault. The logging level is FATAL so a
+// refused run is reported only through its Result.
+Ort::Env& SharedEnv() {
+  static Ort::Env* const env = new Ort::Env(ORT_LOGGING_LEVEL_FATAL, "laya");
+  return *env;
 }
 
 std::string Dtype(ONNXTensorElementDataType t) {
@@ -40,9 +39,45 @@ std::string Dtype(ONNXTensorElementDataType t) {
 const char* const kInputNames[5] = {"input_ids", "attention_mask", "marker_pos", "marker_mask", "qtype"};
 const char* const kOutputNames[2] = {"logits", "act_logits"};
 
+// Fires SetTerminate on a run when the cancel token fires. The token is a polled flag, so the
+// watcher waits on a condition variable with a short timeout; the run ending wakes it at once.
+class Watcher {
+ public:
+  Watcher(const CancelToken& cancel, Ort::RunOptions& ro) : cancel_(cancel), ro_(ro), thread_([this] { Loop(); }) {}
+  ~Watcher() {
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      done_ = true;
+    }
+    cv_.notify_all();
+    thread_.join();
+  }
+  bool terminated() const { return terminated_.load(); }
+
+ private:
+  void Loop() {
+    std::unique_lock<std::mutex> lock(mu_);
+    while (!done_) {
+      if (cancel_.cancelled()) {
+        terminated_ = true;
+        ro_.SetTerminate();
+        return;
+      }
+      cv_.wait_for(lock, std::chrono::milliseconds(2));
+    }
+  }
+  CancelToken cancel_;
+  Ort::RunOptions& ro_;
+  std::mutex mu_;
+  std::condition_variable cv_;
+  bool done_ = false;
+  std::atomic<bool> terminated_{false};
+  std::thread thread_;  // last: started after the rest is built
+};
+
 class OrtSession final : public infer::Session {
  public:
-  OrtSession(std::shared_ptr<Ort::Env> env, std::unique_ptr<Ort::Session> s) : env_(std::move(env)), session_(std::move(s)) {}
+  explicit OrtSession(std::unique_ptr<Ort::Session> s) : session_(std::move(s)) {}
   ~OrtSession() override { Close(); }
 
   Result<infer::Output> Run(const infer::Batch& b, const CancelToken& cancel) override {
@@ -57,9 +92,13 @@ class OrtSession final : public infer::Session {
     }
   }
 
+  // Refuses new runs, terminates the runs in flight, and releases the session once they have left.
   std::string Close() override {
     try {
-      std::unique_lock<std::shared_mutex> lock(mu_);  // waits for runs in flight
+      std::unique_lock<std::mutex> lock(mu_);
+      closing_ = true;
+      for (Ort::RunOptions* r : flights_) r->SetTerminate();
+      idle_.wait(lock, [this] { return flights_.empty(); });
       session_.reset();
       return "";
     } catch (...) {
@@ -68,6 +107,29 @@ class OrtSession final : public infer::Session {
   }
 
  private:
+  // Registers a run for Close to terminate; the destructor leaves the list and wakes Close.
+  class Flight {
+   public:
+    Flight(OrtSession& s, Ort::RunOptions& ro) : s_(s), ro_(ro) {
+      std::lock_guard<std::mutex> lock(s_.mu_);
+      if (s_.closing_ || !s_.session_) return;
+      s_.flights_.insert(&ro_);
+      ok_ = true;
+    }
+    ~Flight() {
+      if (!ok_) return;
+      std::lock_guard<std::mutex> lock(s_.mu_);
+      s_.flights_.erase(&ro_);
+      s_.idle_.notify_all();
+    }
+    bool ok() const { return ok_; }
+
+   private:
+    OrtSession& s_;
+    Ort::RunOptions& ro_;
+    bool ok_ = false;
+  };
+
   Result<infer::Output> RunImpl(const infer::Batch& b, const CancelToken& cancel) {
     using R = Result<infer::Output>;
     if (cancel.cancelled()) return R::Fail(infer::kCancelled);
@@ -76,8 +138,9 @@ class OrtSession final : public infer::Session {
     for (uint8_t m : b.marker_mask) {
       if (m > 1) return R::Fail("onnx: marker_mask holds a value other than 0 or 1");
     }
-    std::shared_lock<std::shared_mutex> lock(mu_);
-    if (!session_) return R::Fail("onnx: session is closed");
+    Ort::RunOptions ro;
+    Flight flight(*this, ro);
+    if (!flight.ok()) return R::Fail("onnx: session is closed");
 
     const Ort::MemoryInfo mem = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
     const int64_t shape2[2] = {b.rows, b.length};
@@ -96,8 +159,14 @@ class OrtSession final : public infer::Session {
                                           shape_m, 2, ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL));
     in.push_back(i64(b.qtype, shape1, 1));
 
-    Ort::RunOptions ro;
-    std::vector<Ort::Value> out = session_->Run(ro, kInputNames, in.data(), in.size(), kOutputNames, 2);
+    Watcher watcher(cancel, ro);
+    std::vector<Ort::Value> out;
+    try {
+      out = session_->Run(ro, kInputNames, in.data(), in.size(), kOutputNames, 2);
+    } catch (const Ort::Exception& e) {
+      if (watcher.terminated() || cancel.cancelled()) return R::Fail(infer::kCancelled);
+      throw;
+    }
     if (out.size() != 2) return R::Fail("onnx: run returned " + std::to_string(out.size()) + " outputs, want 2");
     if (cancel.cancelled()) return R::Fail(infer::kCancelled);
 
@@ -115,8 +184,10 @@ class OrtSession final : public infer::Session {
     return CollectOutput(b, t[0], t[1]);
   }
 
-  std::shared_ptr<Ort::Env> env_;  // keeps the environment alive past session_
-  std::shared_mutex mu_;
+  std::mutex mu_;  // guards closing_, flights_ and the release of session_
+  std::condition_variable idle_;
+  bool closing_ = false;
+  std::set<Ort::RunOptions*> flights_;
   std::unique_ptr<Ort::Session> session_;
 };
 
@@ -132,19 +203,17 @@ std::string RuntimeVersion() {
 
 Result<std::unique_ptr<infer::Session>> Open(const std::string& graph_path, const Options& options) {
   using R = Result<std::unique_ptr<infer::Session>>;
-  if (options.intra_op_threads < 0 || options.inter_op_threads < 0 || options.intra_op_threads > kMaxThreads ||
-      options.inter_op_threads > kMaxThreads) {
-    return R::Fail("onnx: thread counts must be between 0 and " + std::to_string(kMaxThreads));
+  if (options.intra_op_threads < 0 || options.intra_op_threads > kMaxThreads) {
+    return R::Fail("onnx: intra_op_threads must be between 0 and " + std::to_string(kMaxThreads));
   }
   const std::string path_problem = CheckPath(graph_path);
   if (!path_problem.empty()) return R::Fail("onnx: " + path_problem);
   try {
-    std::shared_ptr<Ort::Env> env = SharedEnv();
+    Ort::Env& env = SharedEnv();
     Ort::SessionOptions so;
     if (options.intra_op_threads > 0) so.SetIntraOpNumThreads(options.intra_op_threads);
-    if (options.inter_op_threads > 0) so.SetInterOpNumThreads(options.inter_op_threads);
     const std::filesystem::path p(graph_path);
-    auto session = std::make_unique<Ort::Session>(*env, p.c_str(), so);
+    auto session = std::make_unique<Ort::Session>(env, p.c_str(), so);
 
     Ort::AllocatorWithDefaultOptions alloc;
     auto describe = [&](bool inputs) {
@@ -168,7 +237,7 @@ Result<std::unique_ptr<infer::Session>> Open(const std::string& graph_path, cons
     };
     const std::string bad = CheckGraph(describe(true), describe(false));
     if (!bad.empty()) return R::Fail("onnx: graph " + graph_path + ": " + bad);
-    return R::Ok(std::unique_ptr<infer::Session>(new OrtSession(std::move(env), std::move(session))));
+    return R::Ok(std::unique_ptr<infer::Session>(new OrtSession(std::move(session))));
   } catch (const Ort::Exception& e) {
     return R::Fail("onnx: cannot open " + graph_path + ": " + e.what());
   } catch (const std::exception& e) {

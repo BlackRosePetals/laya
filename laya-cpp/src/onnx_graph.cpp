@@ -118,7 +118,7 @@ Result<infer::Output> CollectOutput(const infer::Batch& b, const OutTensor& logi
       return Result<infer::Output>::Fail(std::string("onnx: output ") + c.name + " holds " + std::to_string(c.t.count) + " values");
     }
     for (int64_t i = 0; i < c.t.count; i++) {
-      if (std::isnan(c.t.data[i])) return Result<infer::Output>::Fail(std::string("onnx: output ") + c.name + " contains NaN");
+      if (!std::isfinite(c.t.data[i])) return Result<infer::Output>::Fail(std::string("onnx: output ") + c.name + " contains NaN or Inf");
     }
   }
   infer::Output o;

@@ -4,6 +4,7 @@
 #include <gtest/gtest.h>
 
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
@@ -13,6 +14,7 @@
 #include <mutex>
 #include <thread>
 
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include "golden.hpp"
@@ -218,6 +220,20 @@ TEST(OnnxCollect, ANaNIsAnErrorNotAnAnswer) {
   EXPECT_FALSE(laya::onnx::CollectOutput(b, Tensor(l, {1, 3}), Tensor(a, {1, 2})).ok());
 }
 
+TEST(OnnxCollect, AnInfinityIsAnErrorNotAnAnswer) {
+  const Batch b = Tiny(1, 3);
+  const float inf = std::numeric_limits<float>::infinity();
+  for (float bad : {inf, -inf}) {
+    std::vector<float> l = {1, bad, 3}, a = {1, 2};
+    auto r = laya::onnx::CollectOutput(b, Tensor(l, {1, 3}), Tensor(a, {1, 2}));
+    ASSERT_FALSE(r.ok());
+    EXPECT_NE(r.error().find("Inf"), std::string::npos);
+    l[1] = 0;
+    a[1] = bad;
+    EXPECT_FALSE(laya::onnx::CollectOutput(b, Tensor(l, {1, 3}), Tensor(a, {1, 2})).ok());
+  }
+}
+
 TEST(OnnxCollect, WrongShapesAreErrors) {
   const Batch b = Tiny(2, 3);
   const std::vector<float> l(6, 1.f), a(4, 1.f), small(2, 1.f);
@@ -234,11 +250,10 @@ TEST(OnnxOpen, ThreadCountsAreRange_Checked) {
   laya::onnx::Options o;
   o.intra_op_threads = -1;
   EXPECT_FALSE(laya::onnx::Open("/nonexistent/laya.onnx", o).ok());
-  o.intra_op_threads = 0;
-  o.inter_op_threads = laya::onnx::kMaxThreads + 1;
+  o.intra_op_threads = laya::onnx::kMaxThreads + 1;
   const auto r = laya::onnx::Open("/nonexistent/laya.onnx", o);
   ASSERT_FALSE(r.ok());
-  EXPECT_NE(r.error().find("thread counts"), std::string::npos);
+  EXPECT_NE(r.error().find("intra_op_threads"), std::string::npos);
 }
 
 TEST(OnnxOpen, AMissingGraphIsAnError) {
@@ -257,6 +272,29 @@ TEST(OnnxOpen, AGarbageFileIsAnErrorNotAnException) {
 TEST(OnnxOpen, AnEmptyFileIsAnError) {
   TempDir d;
   EXPECT_FALSE(laya::onnx::Open(d.File("laya.onnx", "")).ok());
+}
+
+// ONNX Runtime refuses external data that leaves the graph's directory (`..` or an absolute path);
+// this pins that, with a real file sitting where the graph points.
+#include "onnx_hostile_graphs.inc"
+TEST(OnnxOpen, ExternalDataOutsideTheGraphDirectoryIsRefused) {
+  TempDir d;
+  fs::create_directories(d.str() + "/sub");
+  {
+    std::ofstream(d.str() + "/secret.bin", std::ios::binary) << std::string(8, '\0');
+  }
+  const struct {
+    const char* name;
+    const char* bytes;
+    size_t size;
+  } cases[] = {{"dotdot", kDotdotGraph, kDotdotGraphSize}, {"absolute", kAbsGraph, kAbsGraphSize}};
+  for (const auto& c : cases) {
+    const std::string path = d.str() + "/sub/" + c.name + ".onnx";
+    std::ofstream(path, std::ios::binary).write(c.bytes, std::streamsize(c.size));
+    const auto r = laya::onnx::Open(path);
+    ASSERT_FALSE(r.ok()) << c.name << " opened";
+    EXPECT_NE(r.error().find("cannot open"), std::string::npos) << r.error();
+  }
 }
 
 TEST(OnnxOpen, TheSplitLayoutIsRefusedByOpen) {
@@ -299,18 +337,6 @@ std::string Need(const char* var) {
 
 std::mutex g_agents_mu;
 std::map<std::string, std::unique_ptr<laya::agent::Agent>> g_agents;
-
-// The agents hold ONNX Runtime, which must be released before static destruction begins (its own
-// statics may already be gone by then), so the test environment closes them.
-class CloseAgents : public ::testing::Environment {
- public:
-  void TearDown() override {
-    std::lock_guard<std::mutex> lock(g_agents_mu);
-    for (auto& kv : g_agents) EXPECT_EQ(kv.second->Close(), "");
-    g_agents.clear();
-  }
-};
-const ::testing::Environment* const g_close_agents = ::testing::AddGlobalTestEnvironment(new CloseAgents);
 
 // One agent per checkpoint for the whole process; the tests only read it.
 laya::agent::Agent* Shared(const Rig& rig, const std::string& graph, const std::string& dir) {
@@ -597,6 +623,14 @@ TEST_P(OnnxRig, SessionRunIsGuardedAgainstHostileBatches) {
   Batch empty;
   EXPECT_FALSE(session.Run(empty, live).ok());
 
+  // Passes every check of ours and fails inside ONNX Runtime (a token id past the vocabulary): the
+  // failure must come back as a Result, not an exception.
+  Batch past_vocab = Tiny(1, 3);
+  past_vocab.input_ids[0] = 1000000000;
+  const auto pv = session.Run(past_vocab, live);
+  ASSERT_FALSE(pv.ok());
+  EXPECT_EQ(pv.error().rfind("onnx: run:", 0), 0u) << pv.error();
+
   laya::CancelToken fired;
   fired.Cancel();
   auto c = session.Run(Tiny(1, 3), fired);
@@ -619,6 +653,136 @@ TEST_P(OnnxRig, CloseIsIdempotentAndRunAfterCloseIsAnError) {
   EXPECT_NE(r.error().find("closed"), std::string::npos) << r.error();
 }
 
+// A batch that keeps the runtime busy for seconds.
+Batch Long(int64_t rows, int64_t length) {
+  Batch b = Tiny(rows, 3);
+  b.length = length;
+  b.input_ids.assign(size_t(rows * length), 5);
+  b.attention_mask.assign(size_t(rows * length), 1);
+  return b;
+}
+using Clock = std::chrono::steady_clock;
+double Since(Clock::time_point t) { return std::chrono::duration<double>(Clock::now() - t).count(); }
+constexpr int64_t kLongRows = 16, kLongLength = 192;
+
+// Seconds one uncancelled long run takes; the tests below only mean something if it is long.
+double LongRunSeconds(laya::infer::Session& s) {
+  const auto t = Clock::now();
+  const auto r = s.Run(Long(kLongRows, kLongLength), laya::CancelToken());
+  EXPECT_TRUE(r.ok()) << (r.ok() ? "" : r.error());
+  return Since(t);
+}
+
+TEST_P(OnnxRig, ACancelDuringARunStopsTheRun) {
+  const Rig& rig = kRigs[GetParam()];
+  NEED_RIG(rig, graph, dir);
+  auto s = laya::onnx::Open(graph);
+  ASSERT_TRUE(s.ok()) << s.error();
+  const double full = LongRunSeconds(*s.value());
+  ASSERT_GT(full, 0.8) << "the long batch is too short to tell a mid-run cancel from a late one";
+  laya::CancelToken token;
+  std::thread canceller([&] {
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    token.Cancel();
+  });
+  const auto t = Clock::now();
+  const auto r = s.value()->Run(Long(kLongRows, kLongLength), token);
+  const double took = Since(t);
+  canceller.join();
+  ASSERT_FALSE(r.ok());
+  EXPECT_TRUE(laya::infer::IsCancelled(r.error())) << r.error();
+  EXPECT_LT(took, full / 3) << "cancelled run took " << took << " s of " << full << " s";
+  EXPECT_TRUE(s.value()->Run(Tiny(1, 3), laya::CancelToken()).ok());  // the session is still usable
+}
+
+TEST_P(OnnxRig, ACancelThatLandsAfterTheRunStillReportsCancelled) {
+  const Rig& rig = kRigs[GetParam()];
+  NEED_RIG(rig, graph, dir);
+  auto s = laya::onnx::Open(graph);
+  ASSERT_TRUE(s.ok()) << s.error();
+  // The token fires inside the post-run window: the run is tiny, so a watcher cannot beat it
+  // reliably; either outcome is allowed only if it is cancelled or a complete correct result.
+  for (int i = 0; i < 50; i++) {
+    laya::CancelToken token;
+    std::thread canceller([&] { token.Cancel(); });
+    const auto r = s.value()->Run(Tiny(2, 3), token);
+    canceller.join();
+    if (!r.ok()) EXPECT_TRUE(laya::infer::IsCancelled(r.error())) << r.error();
+    else EXPECT_EQ(r.value().logits.size(), 6u);
+  }
+}
+
+TEST_P(OnnxRig, CloseInterruptsARunInFlight) {
+  const Rig& rig = kRigs[GetParam()];
+  NEED_RIG(rig, graph, dir);
+  auto s = laya::onnx::Open(graph);
+  ASSERT_TRUE(s.ok()) << s.error();
+  const double full = LongRunSeconds(*s.value());
+  ASSERT_GT(full, 0.8);
+  std::atomic<bool> failed{false};
+  std::thread runner([&] { failed = !s.value()->Run(Long(kLongRows, kLongLength), laya::CancelToken()).ok(); });
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  const auto t = Clock::now();
+  EXPECT_EQ(s.value()->Close(), "");
+  const double took = Since(t);
+  runner.join();
+  EXPECT_TRUE(failed.load());
+  EXPECT_LT(took, full / 3) << "Close took " << took << " s of a " << full << " s run";
+}
+
+TEST_P(OnnxRig, CloseReturnsPromptlyUnderSustainedRunTraffic) {
+  const Rig& rig = kRigs[GetParam()];
+  NEED_RIG(rig, graph, dir);
+  auto s = laya::onnx::Open(graph);
+  ASSERT_TRUE(s.ok()) << s.error();
+  const auto t0 = Clock::now();
+  ASSERT_TRUE(s.value()->Run(Long(4, 128), laya::CancelToken()).ok());
+  const double one = Since(t0);  // one such run alone
+  ASSERT_GT(one, 0.15);
+  std::atomic<bool> stop{false};
+  std::atomic<int> ran{0}, refused{0}, other{0};
+  std::vector<std::thread> threads;
+  for (int i = 0; i < 4; i++) {
+    threads.emplace_back([&] {
+      while (!stop.load()) {
+        const auto r = s.value()->Run(Long(4, 128), laya::CancelToken());
+        if (r.ok()) ran++;
+        else if (r.error().find("closed") != std::string::npos || r.error().find("run:") != std::string::npos) refused++;
+        else other++;
+      }
+    });
+  }
+  std::this_thread::sleep_for(std::chrono::milliseconds(300));
+  const auto t = Clock::now();
+  EXPECT_EQ(s.value()->Close(), "");
+  const double took = Since(t);
+  stop = true;
+  for (auto& th : threads) th.join();
+  EXPECT_GT(ran.load() + refused.load(), 0);  // every thread ended on a Result, none on a hang
+  EXPECT_EQ(other.load(), 0);
+  EXPECT_LT(took, one / 2) << "Close took " << took << " s with one run alone taking " << one << " s";
+}
+
+// A user program may hold a Session and an Agent in statics; it must exit cleanly, closed or not.
+TEST_P(OnnxRig, AStaticSessionAndAgentExitCleanly) {
+  const Rig& rig = kRigs[GetParam()];
+  NEED_RIG(rig, graph, dir);
+  for (const char* mode : {"", "close"}) {
+    const pid_t pid = fork();
+    ASSERT_GE(pid, 0);
+    if (pid == 0) {
+      const char* argv[] = {LAYA_STATIC_HOLDER, graph.c_str(), dir.c_str(), mode, nullptr};
+      if (*mode == 0) argv[3] = nullptr;
+      execv(LAYA_STATIC_HOLDER, const_cast<char* const*>(argv));
+      _exit(127);
+    }
+    int status = 0;
+    ASSERT_EQ(waitpid(pid, &status, 0), pid);
+    EXPECT_TRUE(WIFEXITED(status)) << "mode '" << mode << "' died by signal " << (WIFSIGNALED(status) ? WTERMSIG(status) : 0);
+    EXPECT_EQ(WEXITSTATUS(status), 0) << "mode '" << mode << "'";
+  }
+}
+
 TEST_P(OnnxRig, SessionsOpenAndCloseWhileOthersRun) {
   const Rig& rig = kRigs[GetParam()];
   NEED_RIG(rig, graph, dir);
@@ -633,7 +797,6 @@ TEST_P(OnnxRig, SessionsOpenAndCloseWhileOthersRun) {
   for (int i = 0; i < 3; i++) {
     laya::onnx::Options o;
     o.intra_op_threads = 1;
-    o.inter_op_threads = 1;
     auto other = laya::onnx::Open(graph, o);  // a second session, dropped without Close
     if (!other.ok() || !other.value()->Run(Tiny(1, 3), laya::CancelToken()).ok()) bad++;
   }

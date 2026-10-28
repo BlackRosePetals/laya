@@ -12,8 +12,10 @@ namespace laya {
 namespace onnx {
 
 struct Options {
-  int intra_op_threads = 0;  // 0 leaves ONNX Runtime's default; at most kMaxThreads
-  int inter_op_threads = 0;
+  // 0 leaves ONNX Runtime's default (one intra-op pool sized to the cores). Every session owns its
+  // own pool and sessions do not share one, so many sessions in one process should set this. There
+  // is no inter-op option: the graph runs sequentially, where it would have no effect.
+  int intra_op_threads = 0;  // at most kMaxThreads
 };
 constexpr int kMaxThreads = 4096;
 
@@ -21,8 +23,10 @@ constexpr int kMaxThreads = 4096;
 std::string RuntimeVersion();
 
 // A Session over one fused laya.onnx (+ laya.onnx.data beside it). Checks the graph's inputs and
-// outputs at once. Run is thread-safe; Close is idempotent and waits for runs in flight. No
-// exception leaves this API.
+// outputs at once. Run is thread-safe and stops in flight when its CancelToken fires (kCancelled).
+// Close is idempotent, refuses new runs, terminates the runs in flight and returns once they have
+// left. A Session or Agent may be held in a static: the process-wide ONNX Runtime environment is
+// never destroyed. No exception leaves this API.
 Result<std::unique_ptr<infer::Session>> Open(const std::string& graph_path, const Options& options = {});
 
 }  // namespace onnx

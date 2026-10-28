@@ -44,7 +44,7 @@ env:
   # compile_flags). Raise it with every test added.
   MIN_TESTS: "423"
   # The onnx job registers the same tests plus the laya_onnx_tests cases.
-  MIN_TESTS_ONNX: "466"
+  MIN_TESTS_ONNX: "479"
   GOLDENS: ${{ github.workspace }}/.cpp-goldens
   LAYA_GOLDENS: ${{ github.workspace }}/.cpp-goldens
   LAYA_CHECKPOINTS: ${{ github.workspace }}/laya-java/.work/checkpoints   # the tokenizer tests need both shipped checkpoints
@@ -122,11 +122,12 @@ jobs:
         if: ${{ !cancelled() }}
         run: python laya-cpp/scripts/check_test_xml.py "$RUNNER_TEMP/ctest.xml" --min-tests "$MIN_TESTS"
 
-  # The ONNX Runtime backend, mirroring go.yml's `onnx` job: the same graph cache keys as java.yml
-  # (so a graph exported there is reused), real graphs for both shipped checkpoints, goldens
+  # The ONNX Runtime backend, mirroring go.yml's `onnx` job: real graphs for both shipped checkpoints, goldens
   # recorded by Python's ONNXAgent on those graphs, and a floor on the tests that must run. The
   # runtime comes from the release archive pinned by sha256 in laya-cpp/cmake/onnxruntime.cmake:
-  # CMake (URL_HASH) verifies it at the moment it is fetched, in every cell. Advisory like `build`.
+  # CMake (URL_HASH) verifies it at the moment it is fetched, in every cell. Advisory like `build`,
+  # and like go.yml's `onnx` job, which is also `continue-on-error`: the MIN_TESTS_ONNX floor blocks
+  # nothing until this job and Go's are made blocking together.
   onnx:
     name: onnx (${{ matrix.compiler }}, ${{ matrix.preset }})
     runs-on: ubuntu-latest
@@ -160,19 +161,22 @@ jobs:
           pip install "torch==2.14.0" --index-url https://download.pytorch.org/whl/cpu
           pip install -r laya-dotnet/tools/requirements-regen.txt
 
-      # Keys are byte-identical to the predict cells in java.yml, so both share the entries.
+      # One cache per checkpoint, at its own path, under cpp-specific keys. java.yml caches only its
+      # multilingual graph, as a whole .work/onnx directory; sharing that entry would let this job
+      # save the english graph into it, and the english graph has no java entry to share. The hash
+      # inputs are java.yml's, so an exporter change invalidates both.
       - name: Cache the multilingual graph
         id: graph-multilingual
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: laya-java/.work/onnx
-          key: laya-java-onnx-${{ runner.os }}-multilingual-${{ hashFiles('laya-java/scripts/prepare_checkpoint.py', 'scripts/export_onnx.py', 'laya/common.py', 'laya-dotnet/tools/requirements-regen.txt') }}
+          path: laya-java/.work/onnx/multilingual
+          key: laya-cpp-onnx-${{ runner.os }}-multilingual-${{ hashFiles('laya-java/scripts/prepare_checkpoint.py', 'scripts/export_onnx.py', 'laya/common.py', 'laya-dotnet/tools/requirements-regen.txt') }}
       - name: Cache the english graph
         id: graph-english
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: laya-java/.work/onnx
-          key: laya-java-onnx-${{ runner.os }}-english-${{ hashFiles('laya-java/scripts/prepare_checkpoint.py', 'scripts/export_onnx.py', 'laya/common.py', 'laya-dotnet/tools/requirements-regen.txt') }}
+          path: laya-java/.work/onnx/english
+          key: laya-cpp-onnx-${{ runner.os }}-english-${{ hashFiles('laya-java/scripts/prepare_checkpoint.py', 'scripts/export_onnx.py', 'laya/common.py', 'laya-dotnet/tools/requirements-regen.txt') }}
       - name: Prepare both checkpoints and their graphs
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}

@@ -2,7 +2,8 @@ cmake_minimum_required(VERSION 3.20)
 project(laya_cpp VERSION 0.0.0 LANGUAGES CXX)
 
 option(LAYA_BUILD_TESTS "Build the GoogleTest suite" ON)
-option(LAYA_ONNX "Build the ONNX Runtime backend (not implemented yet)" OFF)
+option(LAYA_ONNX "Build laya_onnx, the ONNX Runtime backend (fetches the pinned runtime unless LAYA_ONNXRUNTIME_ROOT is set)" OFF)
+set(LAYA_ONNXRUNTIME_ROOT "" CACHE PATH "An unpacked onnxruntime release (include/ and lib/) to use instead of the download")
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -31,7 +32,11 @@ target_include_directories(laya PUBLIC include)
 laya_target_flags(laya)
 
 if(LAYA_ONNX)
-  message(FATAL_ERROR "LAYA_ONNX is not implemented yet")
+  include(cmake/onnxruntime.cmake)
+  add_library(laya_onnx src/onnx_graph.cpp src/onnx.cpp)
+  target_include_directories(laya_onnx PUBLIC include)
+  target_link_libraries(laya_onnx PUBLIC laya PRIVATE laya_ort)
+  laya_target_flags(laya_onnx)
 endif()
 
 if(LAYA_BUILD_TESTS)
@@ -63,9 +68,21 @@ if(LAYA_BUILD_TESTS)
   target_link_libraries(laya_c4_cli PRIVATE laya)
   laya_target_flags(laya_c4_cli)
 
+  if(LAYA_ONNX)
+    add_executable(laya_onnx_tests tests/onnx_test.cpp)
+    target_link_libraries(laya_onnx_tests PRIVATE laya_onnx laya_ort GTest::gtest_main)
+    laya_target_flags(laya_onnx_tests)
+    laya_ort_runtime_path(laya_onnx_tests)
+    target_compile_definitions(laya_onnx_tests PRIVATE LAYA_ORT_VERSION="${LAYA_ORT_VERSION}")
+  endif()
+
   include(GoogleTest)
   # PRE_TEST: the parametrized rows are counted from the goldens, which exist at test time.
   gtest_discover_tests(laya_tests DISCOVERY_MODE PRE_TEST DISCOVERY_TIMEOUT 120)
+
+  if(LAYA_ONNX)
+    gtest_discover_tests(laya_onnx_tests DISCOVERY_MODE PRE_TEST DISCOVERY_TIMEOUT 120)
+  endif()
 
   # Listing must stay cheap (it runs before every ctest): bound it at 3 s with the goldens loaded.
   add_test(NAME discovery_fast

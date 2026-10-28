@@ -2772,6 +2772,10 @@ def test_question_validation_matches_the_agent():
          {"type": "noul", "instructions": "is true?", "option_order": "10"}),
         ("option_order_null",
          {"type": "noul", "instructions": "is true?", "option_order": None}),
+        # A JSON array or object as the type is unhashable, so testing it against the set of
+        # types raised TypeError instead of naming the question.
+        ("type_list", {"type": [], "instructions": "is true?"}),
+        ("type_object", {"type": {}, "instructions": "is true?"}),
     ]
     for label, qdef in parity:
         ok("question_parity/core_rejects_%s" % label, core_rejects("q", qdef))
@@ -2846,6 +2850,8 @@ def test_a_bad_question_is_a_caller_error_not_a_server_fault():
                               "criteria": ["fine", None]}),
         ("option_order_repeat", {"type": "noul", "instructions": "is true?",
                                  "option_order": [0, 0]}),
+        ("type_list", {"type": [], "instructions": "is true?"}),
+        ("type_object", {"type": {}, "instructions": "is true?"}),
     ):
         try:
             server_mod._wrap(server_mod.laya_predict, state=STATE, questions={"q": qdef},

@@ -145,7 +145,7 @@ def validate_questions(questions: Any) -> dict:
         if not isinstance(spec, dict):
             raise ToolError("invalid_questions", f"questions[{name}] must be an object")
         qtype = spec.get("type")
-        if qtype not in VALID_TYPES:
+        if not isinstance(qtype, str) or qtype not in VALID_TYPES:
             raise ToolError(
                 "invalid_questions",
                 f"questions[{name}].type must be one of {sorted(VALID_TYPES)}, got {qtype!r}",

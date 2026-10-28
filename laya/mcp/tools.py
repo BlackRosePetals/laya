@@ -556,7 +556,7 @@ def _call_route(route: Callable, *args, explain: bool, **kwargs) -> Any:
 
 
 def _route_to_dict(decision: Any, *, explain: bool) -> dict:
-    # Predict tools also use _decision_to_dict; only routing tools expose this opt-in field.
+    # laya_shortlist and laya_tournament share _decision_to_dict; keep their routing output unchanged.
     out = _decision_to_dict(decision)
     if explain:
         detection = decision.get("detection") if isinstance(decision, dict) else getattr(decision, "detection", None)

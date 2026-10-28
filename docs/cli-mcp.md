@@ -160,7 +160,7 @@ Laya does not open a network port.
 | Tool | What it does | Main inputs |
 |---|---|---|
 | `laya_status` | Reports the device per loaded checkpoint (`checkpoint_devices`), the configured or actual device, CUDA availability, loaded checkpoints, preload state, readiness, and package versions. | none |
-| `laya_route` | Selects a checkpoint and returns its model, repository, and reason without running a forward pass. | `state`, `questions`, optional `model`, `task`, `lang`, `lang_guess` |
+| `laya_route` | Selects a checkpoint and returns its model, repository, and reason without running a forward pass. Opt into language diagnostics with `explain`. | `state`, `questions`, optional `model`, `task`, `lang`, `lang_guess`, `explain` (default `false`) |
 | `laya_predict` | Runs typed questions and returns answers, routing metadata, latency, and the answering device when readable. | `state`, `questions`, optional `model` (`auto`, `english`, `multilingual`, or `typed-decisions`), `task`, `lang`, `lang_guess`, `max_len`, `head_max_len`, `min_confidence` |
 | `laya_shortlist` | Shortlists a many-option choice question, then answers it and returns the shortlist metadata. | `state`, `questions`, optional `model`, `k` (default `20`), `task`, `lang`, `lang_guess`, `max_len`, `head_max_len`, `min_confidence` |
 | `laya_tournament` | Narrows large choices in balanced rounds using the decision model, then answers the complete request. In-process only. | `state`, `questions`, optional `model`, `group_size` (default `16`), `task`, `lang`, `lang_guess`, `max_len`, `head_max_len`, `min_confidence` |
@@ -171,6 +171,24 @@ Laya does not open a network port.
 | `laya_predict_long` | Scans a state longer than the context window in overlapping windows, then answers with per-answer window attribution and the window count. | `state`, `questions`, optional `model`, `window`, `stride`, `task`, `lang` |
 
 On `laya_route`, `laya_predict`, `laya_shortlist`, `laya_tournament`, and `laya_decide`, `model` may be omitted or set to `null`; either form resolves to `auto`.
+
+`laya_route` accepts `explain: true` to add a top-level `diagnostic` with the core detector's
+`stage`, `reason`, and `source`. When no source exists, `source` is `null`. When the final routing
+decision has no diagnostic (for example, an explicit model or language override, or a hook
+replacement), `diagnostic` is `null`. The diagnostic comes from that routing call; it does not
+run detection again after a hook. Omitted or `false` keeps the existing three-field result.
+Only booleans are accepted: strings such as `"false"`, numbers, and `null` are rejected with an
+error naming `explain`. Direct Python helper calls report `invalid_explain`; MCP rejects them
+during argument validation. An injected router that rejects the requested `explain` keyword
+reports `unsupported_explain`, with no retry without the flag. Errors inside a router retain
+the existing internal-error path.
+
+The added diagnostic contains no caller **values** or `mixed_segment` text. Its bounded
+`source.path` can contain caller-chosen field names; the existing routing `reason` can already
+contain an input segment. This is not a promise that the whole response is free of caller text.
+Even with `LAYA_BASE_URL`, it describes routing performed by the MCP process, not the HTTP
+server's actual prediction on a potentially different version or configuration. Shared-server
+routing uses no HTTP request or model. Ordinary local startup keeps its configured preload policy.
 
 The three batch and schema tools exist because the same operations are available on the SDK and
 `laya-serve`: handling many requests, or serving a caller that already knows the answer shape,

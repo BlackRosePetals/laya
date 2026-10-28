@@ -119,6 +119,7 @@ PYTEST_SUITES = [
     "tests/test_evals_tournament.py",
     "tests/test_serve.py",
     "tests/test_mcp_remote.py",
+    "tests/test_mcp_diagnostics.py",
     "tests/test_router_batch.py",
     "tests/test_predict_batch.py",
     "tests/test_system_one_lang.py",

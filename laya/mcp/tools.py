@@ -536,6 +536,34 @@ def _decision_to_dict(decision: Any) -> dict:
     }
 
 
+def _validate_explain(explain: Any) -> bool:
+    if not isinstance(explain, bool):
+        raise ToolError("invalid_explain", "explain must be a boolean")
+    return explain
+
+
+def _call_route(route: Callable, *args, explain: bool, **kwargs) -> Any:
+    if not explain:
+        return route(*args, **kwargs)
+    try:
+        return route(*args, explain=True, **kwargs)
+    except TypeError as exc:
+        # Only a keyword binding refusal, not a TypeError raised inside the router.
+        # Never retry without the explanation the caller explicitly requested.
+        if exc.__traceback__.tb_next is None and "unexpected keyword argument 'explain'" in str(exc):
+            raise ToolError("unsupported_explain", "router does not support explain=True") from exc
+        raise
+
+
+def _route_to_dict(decision: Any, *, explain: bool) -> dict:
+    # Predict tools also use _decision_to_dict; only routing tools expose this opt-in field.
+    out = _decision_to_dict(decision)
+    if explain:
+        detection = decision.get("detection") if isinstance(decision, dict) else getattr(decision, "detection", None)
+        out["diagnostic"] = detection.get("diagnostic") if isinstance(detection, dict) else None
+    return out
+
+
 def laya_route(
     state: Any,
     questions: Any,
@@ -544,6 +572,7 @@ def laya_route(
     task: Any = None,
     lang: Any = None,
     lang_guess: Any = None,
+    explain: Any = False,
     router: Any = None,
 ) -> dict:
     """Routing decision only: no forward pass.
@@ -553,7 +582,11 @@ def laya_route(
     running anything.
     Passing a predict call's controls here reproduces the ``routing`` block it returned, which is
     what makes a route a cheap explanation of a decision rather than a different decision.
+
+    ``explain=True`` adds the final decision's built-in detection diagnostic, or ``None`` when
+    none exists. It never re-runs detection or exposes the rest of the detection payload.
     """
+    explain = _validate_explain(explain)
     state_d = validate_state(state)
     questions_d = validate_questions(questions)
     # `auto` is this layer's word for "do not pin"; core has no such name, so it becomes an absent
@@ -589,7 +622,8 @@ def laya_route(
         raise ToolError("models_not_ready", "Router is not loaded")
     if not hasattr(router, "route"):
         raise ToolError("internal_error", "router has no route() method")
-    return _decision_to_dict(router.route(state_d, questions_d, **overrides))
+    decision = _call_route(router.route, state_d, questions_d, explain=explain, **overrides)
+    return _route_to_dict(decision, explain=explain)
 
 
 # Where the reusable shortlist embedder lives. Kept private and on the agent, so the

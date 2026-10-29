@@ -344,10 +344,8 @@ std::string Need(const char* var) {
 std::mutex g_agents_mu;
 std::map<std::string, std::unique_ptr<laya::agent::Agent>> g_agents;
 
-// The agents hold ONNX Runtime sessions, which must be closed before static destruction begins: the
-// runtime's statics may already be gone by then, and an agent still open at exit aborted some
-// asan/tsan processes after their tests passed ("recursive_mutex lock failed"). Close is the
-// supported way to end a session held in a static.
+// Closes the shared agents after the last test, so Close on a live agent is checked once per run.
+// Holding them open at exit is also fine (AStaticSessionAndAgentExitCleanly).
 class CloseAgents : public ::testing::Environment {
  public:
   void TearDown() override {

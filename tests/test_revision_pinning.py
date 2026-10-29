@@ -173,6 +173,20 @@ class VerifyDigestsTests(unittest.TestCase):
         with patch.dict(os.environ, {"LAYA_SHA256_DIGESTS": json.dumps({"weights.bin": self.digest})}):
             verify_digests(self.dir)
 
+    def test_an_unreadable_environment_map_is_a_value_error(self):
+        # `json` refuses a document two ways: a `ValueError` for text that is not JSON, and -- for a
+        # nesting depth past the scanner's own stack -- a `RecursionError`, which is a `RuntimeError`
+        # and so was never in the `except` here. The second escaped `load()` as an interpreter
+        # traceback instead of the refusal this function's docstring names, which is what
+        # `laya/_eval_policy.py`, `laya/evidence.py` and `laya/cli.py` already refuse to let a
+        # caller's JSON do.
+        for bad in ("{not json", "[" * 100000 + "]" * 100000):
+            with self.subTest(value=bad[:20] + ("..." if len(bad) > 20 else "")):
+                with patch.dict(os.environ, {"LAYA_SHA256_DIGESTS": bad}):
+                    with self.assertRaises(ValueError) as cm:
+                        verify_digests(self.dir)
+                self.assertIn("LAYA_SHA256_DIGESTS", str(cm.exception))
+
     def test_external_onnx_digest_is_supported(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "model.onnx")
@@ -625,7 +639,12 @@ class RouterEnvDigestTests(unittest.TestCase):
     def test_unparseable_environment_is_not_this_layers_error(self):
         # `laya.revisions.verify_digests` owns the message a malformed value gets; a Router
         # that repeated it would be a second copy of a rule it does not enforce.
-        for value in ("", "   ", "{not json", "[]", '"digests"', "{}"):
+        #
+        # The last value is the shape `except ValueError` here did not cover: `json` answers a
+        # nesting depth past its own stack with a `RecursionError`, a `RuntimeError`, so building a
+        # Router on it crashed instead of naming nothing -- the one unparseable input this layer
+        # promises to hand on rather than report.
+        for value in ("", "   ", "{not json", "[]", '"digests"', "{}", "[" * 100000 + "]" * 100000):
             with self._env(value):
                 self.assertEqual(Router().sha256_digests, {}, value)
 

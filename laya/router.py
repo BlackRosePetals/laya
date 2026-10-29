@@ -441,7 +441,12 @@ def _digests_from_env(models: Dict[str, Any], resolve=normalise_name) -> Dict[st
         return {}
     try:
         data = json.loads(raw)
-    except ValueError:
+    except (ValueError, RecursionError):
+        # `RecursionError` is a `RuntimeError`, so `except ValueError` did not cover the one shape
+        # of unparseable this variable can have that is not a decode error: `json` answers a
+        # nesting depth it will not walk with a stack overflow. It names nothing, so it names no
+        # checkpoint here either -- `laya.revisions` reports it, in the words this docstring
+        # already promises are the only ones this layer uses.
         return {}
     if not isinstance(data, dict) or not data:
         return {}

@@ -908,6 +908,40 @@ for _body, _label in _CREWAI_NESTED_ROUTE:
         except Exception as exc:
             check_true("nested/%s/route is RuntimeError" % _label, False, type(exc).__name__)
 
+# A `choice` may name an index the crew does not have. `chosen_key` is remote JSON and `agents` is
+# the caller's list, and the code parsed `agent_N` straight into `agents[N]`: `agent_9` raised a
+# bare IndexError out of the routing decision, and `agent_-1` wrapped to the LAST agent -- a route
+# no caller asked for and nothing in the decision names. `tools.py:493` answers an unknown decision
+# by name instead of raising, so the index range is checked the same way here.
+_CREWAI_CHOICE_INDEX = [
+    "agent_4",      # one past the end of the four-agent crew
+    "agent_9",      # far past the end
+    "agent_-1",     # would wrap to the last agent
+    "agent_-99",    # far before the start
+]
+for _choice in _CREWAI_CHOICE_INDEX:
+    with patch("urllib.request.build_opener") as _m:
+        _m.return_value.open.return_value = DummyHTTPResponse(
+            {"answers": {"delegation": {"choice": _choice, "answer_confidence": 0.95}}})
+        try:
+            _d = LayaCrewRouter(base_url="http://localhost:8000").route("Analyze codebase", agents)
+            check_true("choice-index/%s/route raises" % _choice, False,
+                       "no error raised (routed to index %r)" % (_d.agent_index,))
+        except RuntimeError as exc:
+            check_true("choice-index/%s/route malformed" % _choice,
+                       "Malformed decision response" in str(exc))
+            check_true("choice-index/%s/route names the choice" % _choice, _choice in str(exc))
+            check_true("choice-index/%s/route names the crew size" % _choice, "4-agent" in str(exc))
+        except Exception as exc:
+            check_true("choice-index/%s/route is RuntimeError" % _choice, False, type(exc).__name__)
+
+# The last real index still routes: the guard is a range check, not a rejection of the highest one.
+with patch("urllib.request.build_opener") as _m:
+    _m.return_value.open.return_value = DummyHTTPResponse(
+        {"answers": {"delegation": {"choice": "agent_3", "answer_confidence": 0.95}}})
+    check("choice-index/last agent still routes",
+          LayaCrewRouter(base_url="http://localhost:8000").route("Analyze codebase", agents).agent_index, 3)
+
 _CREWAI_NESTED_SCREEN = [
     ({"answers": []}, "answers-list"),
     ({"answers": {"harm_severity": "nope"}}, "answer-str"),

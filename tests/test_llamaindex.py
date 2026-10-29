@@ -919,6 +919,37 @@ for _body, _surface, _label in _LLAMA_NESTED:
         except Exception as exc:
             check_true("nested/%s is RuntimeError" % _label, False, type(exc).__name__)
 
+# A `choice` may name an index the caller's list does not have. `chosen_key` is remote JSON and
+# `choices` is the caller's, and `choice_N` was parsed straight into `choices[N]`: `choice_9` raised
+# a bare IndexError out of the selection and `choice_-1` wrapped to the LAST tool -- a selection no
+# caller asked for and nothing in the decision names. `LayaQueryRouter.route` in this module already
+# treats a name outside its engines as no match, so the single selector now checks the range too.
+_LLAMA_CHOICE_INDEX = ["choice_4", "choice_9", "choice_-1", "choice_-99"]
+for _choice in _LLAMA_CHOICE_INDEX:
+    with patch("urllib.request.build_opener") as _m:
+        _m.return_value.open.return_value = DummyHTTPResponse(
+            {"answers": {"selector": {"choice": _choice, "answer_confidence": 0.95}}})
+        try:
+            _r = LayaSingleSelector(base_url="http://localhost:8000").select(
+                tools, "Query via remote server")
+            check_true("choice-index/%s/select raises" % _choice, False,
+                       "no error raised (selected index %r)" % (_r.selections[0].index,))
+        except RuntimeError as exc:
+            check_true("choice-index/%s/select malformed" % _choice,
+                       "Malformed decision response" in str(exc))
+            check_true("choice-index/%s/select names the choice" % _choice, _choice in str(exc))
+            check_true("choice-index/%s/select names the count" % _choice, "4 choices" in str(exc))
+        except Exception as exc:
+            check_true("choice-index/%s/select is RuntimeError" % _choice, False, type(exc).__name__)
+
+# The last real index still selects: the guard is a range check, not a rejection of the highest one.
+with patch("urllib.request.build_opener") as _m:
+    _m.return_value.open.return_value = DummyHTTPResponse(
+        {"answers": {"selector": {"choice": "choice_3", "answer_confidence": 0.95}}})
+    check("choice-index/last choice still selects",
+          LayaSingleSelector(base_url="http://localhost:8000").select(
+              tools, "Query via remote server").selections[0].index, 3)
+
 print(f"FAIL: {len(FAIL)}")
 for f in FAIL:
     print(f"  - {f}")

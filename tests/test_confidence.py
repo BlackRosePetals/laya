@@ -127,7 +127,13 @@ from laya.confidence import check_min_confidence, flag_low_confidence  # noqa: E
 for valid in (0.0, 0.5, 1.0, 0, 1, 0.85):
     check("min_confidence/valid %.2f" % valid, check_min_confidence(valid), float(valid))
 
-for invalid in (True, False, -0.01, 1.01, -1.0, 2.0, float("nan"), float("inf"), float("-inf"), "0.5", None, [0.5]):
+for invalid in (True, False, -0.01, 1.01, -1.0, 2.0, float("nan"), float("inf"), float("-inf"), "0.5", None, [0.5],
+                # A JSON integer wider than a double is the third way a client's threshold is not a
+                # number: `math.isfinite` raises `OverflowError` rather than answering "not finite",
+                # so this walked out of `check_min_confidence` -- and out of `validate_min_confidence`,
+                # whose docstring says it "only wraps its ValueError as a clean invalid_min_confidence
+                # the client can read" -- as an interpreter error instead of the refusal.
+                10 ** 400, -(10 ** 400)):
     try:
         check_min_confidence(invalid)
         FAIL.append("min_confidence/should reject %r" % (invalid,))
@@ -245,6 +251,11 @@ odd = [{"answers": {
     # None is not None is also False), so nothing else pinned this down.
     "q_nan_entropy": {"type": "choice", "confidence": float("nan")},
     "q_bool_entropy": {"type": "choice", "confidence": True},
+    # Both readers above end in `math.isfinite`, and a 400-digit integer is what JSON's unbounded
+    # grammar hands them: the gate crashed instead of reporting `unevaluated`, from the same field
+    # it is defined against and from the entropy fallback that already leaked a NaN.
+    "q_overflow": {"type": "choice", "answer_confidence": 10 ** 400},
+    "q_overflow_entropy": {"type": "choice", "confidence": 10 ** 400},
     "q_fine": {"type": "choice", "answer_confidence": 0.99},
 }}]
 apply_confidence_gate(odd, 0.80)

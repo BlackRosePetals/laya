@@ -2563,7 +2563,13 @@ def test_min_confidence_control():
     for value in (0, 0.0, 0.5, 1, 1.0, 0.94):
         ok("minconf/ok_%r" % (value,), validate_min_confidence(value) == float(value),
            repr(validate_min_confidence(value)))
-    for bad in (-0.1, 1.1, 2, True, False, [], {}, "0.5", float("nan"), float("inf")):
+    for bad in (-0.1, 1.1, 2, True, False, [], {}, "0.5", float("nan"), float("inf"),
+                # "only re-labels the refusal" holds only while core's refusal reaches this layer as
+                # the exception it catches. A 400-digit JSON integer -- which this server's clients
+                # can send, since JSON has no double limit -- raised `OverflowError` out of
+                # `math.isfinite`, past `except (TypeError, ValueError)`, so `min_confidence` was the
+                # one field a client could crash the tool with instead of being refused.
+                10 ** 400, -(10 ** 400)):
         expect_tool_error("minconf/rejected_%r" % (bad,),
                           lambda b=bad: validate_min_confidence(b), "invalid_min_confidence")
 

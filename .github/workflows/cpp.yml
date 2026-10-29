@@ -56,7 +56,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: security           # the GoogleTest pin is verified before it is fetched and built
     continue-on-error: true   # advisory: see the header
-    timeout-minutes: 20
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -116,7 +116,7 @@ jobs:
 
       - name: Test
         working-directory: laya-cpp
-        run: ctest --preset "${{ matrix.preset }}" --output-junit "$RUNNER_TEMP/ctest.xml"
+        run: ctest --preset "${{ matrix.preset }}" -j4 --output-junit "$RUNNER_TEMP/ctest.xml"
 
       - name: Count tests (fail on skip, enforce the floor)
         if: ${{ !cancelled() }}

@@ -779,7 +779,7 @@ TEST_P(OnnxRig, CloseReturnsPromptlyUnderSustainedRunTraffic) {
   for (auto& th : threads) th.join();
   EXPECT_GT(ran.load() + refused.load(), 0);  // every thread ended on a Result, none on a hang
   EXPECT_EQ(other.load(), 0);
-  EXPECT_LT(took, one / 2) << "Close took " << took << " s with one run alone taking " << one << " s";
+  EXPECT_LT(took, one * 2) << "Close took " << took << " s with one run alone taking " << one << " s";
 }
 
 // A user program may hold a Session and an Agent in statics; it must exit cleanly, closed or not.

@@ -47,6 +47,7 @@ from typing import Any
 try:
     from mcp.server.mcpserver import MCPServer
     from mcp.server.mcpserver.exceptions import ToolError as McpToolError
+    from pydantic import StrictBool
 except ImportError as exc:  # mcp extra not installed
     raise ImportError(
         "the laya[mcp] extra (mcp>=2.2.0) is required to run the MCP server: "
@@ -264,7 +265,8 @@ def laya_status_tool() -> str:
         "Use this to explain routing (english vs multilingual vs typed-decisions) to the user. "
         "Passing a laya_predict call's model/task/lang/lang_guess here reproduces the routing block it "
         "reported, without paying for the forward pass; leaving model unset (or 'auto') routes as "
-        "normal. "
+        "normal. explain=true adds the final routing decision's language diagnostic, or null; "
+        "it describes this MCP process's routing even in remote mode. "
         + _GUARDRAILS
         + _CONTROLS_DOC
     ),
@@ -276,6 +278,7 @@ def laya_route_tool(
     task: str | None = None,
     lang: str | None = None,
     lang_guess: str | None = None,
+    explain: StrictBool = False,
 ) -> str:
     """Decide which Laya checkpoint would answer, without running a forward pass."""
     router = _router_or_error()
@@ -287,6 +290,7 @@ def laya_route_tool(
         task=task,
         lang=lang,
         lang_guess=lang_guess,
+        explain=explain,
         router=router,
     )
 
@@ -390,14 +394,16 @@ def laya_predict_batch_tool(requests: list, batch_size: int = 0, hooks_timeout: 
         + batch_item_key_doc(omit=("max_len", "head_max_len")) + ". Use this to "
         "inspect or aggregate the routing of a workload before paying model-load cost. "
         "Returns one {model, repo, reason} decision per request in input order, plus "
-        "model_counts. hooks_timeout: positive number or unset -- override the "
+        "model_counts. explain=true adds each final decision's language diagnostic, or null; "
+        "defaults to false. In shared-server mode this is local routing evidence, not the HTTP "
+        "server's prediction. hooks_timeout: positive number or unset -- override the "
         "Router's own hook deadline for this sweep's on_route dispatch, so a slow "
         "or hung operator hook cannot stall a routing pass the caller only wants "
         "the checkpoint labels for. "
         + _GUARDRAILS
     ),
 )
-def laya_route_batch_tool(requests: list, hooks_timeout: float = 0) -> str:
+def laya_route_batch_tool(requests: list, hooks_timeout: float = 0, explain: StrictBool = False) -> str:
     """Route many requests to checkpoints without a forward pass."""
     router = _router_or_error()
     # hooks_timeout=0 means "unset": MCP clients send defaults eagerly, and
@@ -410,6 +416,7 @@ def laya_route_batch_tool(requests: list, hooks_timeout: float = 0) -> str:
         laya_route_batch,
         requests=requests,
         hooks_timeout=hooks_timeout,
+        explain=explain,
         router=router,
     )
 

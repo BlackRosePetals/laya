@@ -160,17 +160,60 @@ Laya does not open a network port.
 | Tool | What it does | Main inputs |
 |---|---|---|
 | `laya_status` | Reports the device per loaded checkpoint (`checkpoint_devices`), the configured or actual device, CUDA availability, loaded checkpoints, preload state, readiness, and package versions. | none |
-| `laya_route` | Selects a checkpoint and returns its model, repository, and reason without running a forward pass. | `state`, `questions`, optional `model`, `task`, `lang`, `lang_guess` |
+| `laya_route` | Selects a checkpoint and returns its model, repository, and reason without running a forward pass. Opt into language diagnostics with `explain`. | `state`, `questions`, optional `model`, `task`, `lang`, `lang_guess`, `explain` (default `false`) |
 | `laya_predict` | Runs typed questions and returns answers, routing metadata, latency, and the answering device when readable. | `state`, `questions`, optional `model` (`auto`, `english`, `multilingual`, or `typed-decisions`), `task`, `lang`, `lang_guess`, `max_len`, `head_max_len`, `min_confidence` |
 | `laya_shortlist` | Shortlists a many-option choice question, then answers it and returns the shortlist metadata. | `state`, `questions`, optional `model`, `k` (default `20`), `task`, `lang`, `lang_guess`, `max_len`, `head_max_len`, `min_confidence` |
 | `laya_tournament` | Narrows large choices in balanced rounds using the decision model, then answers the complete request. In-process only. | `state`, `questions`, optional `model`, `group_size` (default `16`), `task`, `lang`, `lang_guess`, `max_len`, `head_max_len`, `min_confidence` |
 | `laya_preset` | Runs a built-in workflow using its built-in question set. | `preset`, `state`, optional `task`, `lang`, `lang_guess`, `max_len`, `head_max_len`, `min_confidence` |
 | `laya_predict_batch` | Answers many requests in one call. Requests are routed first and grouped by checkpoint, so matching question schemas share forward passes; answers come back in input order. | `requests`, each `{state, questions, model?, task?, lang?, lang_guess?, max_len?, head_max_len?}`, optional `batch_size`, `hooks_timeout`, `min_confidence`, `sort_by_length` |
-| `laya_route_batch` | Decides which checkpoint would answer each request, with no forward pass and no checkpoint load. | `requests`, each `{state, questions, model?, task?, lang?, lang_guess?}`, optional `hooks_timeout` |
+| `laya_route_batch` | Decides which checkpoint would answer each request, with no forward pass and no checkpoint load. Opt into per-decision diagnostics with `explain`. | `requests`, each `{state, questions, model?, task?, lang?, lang_guess?}`, optional `hooks_timeout`, `explain` (default `false`, for the whole batch) |
 | `laya_decide` | Answers a JSON-schema-shaped decision in one forward pass and returns the decided values with per-field confidence, instead of an answer map to parse. Schema properties may be enum choices, booleans, or integers with a minimum and maximum; free strings, arrays, and nested objects are rejected by path. | `state`, `schema`, optional `model`, `min_confidence` |
 | `laya_predict_long` | Scans a state longer than the context window in overlapping windows, then answers with per-answer window attribution and the window count. | `state`, `questions`, optional `model`, `window`, `stride`, `task`, `lang` |
 
 On `laya_route`, `laya_predict`, `laya_shortlist`, `laya_tournament`, and `laya_decide`, `model` may be omitted or set to `null`; either form resolves to `auto`.
+
+`laya_route` accepts `explain: true` to add a top-level `diagnostic` with the core detector's
+`stage`, `reason`, and `source`. When no source exists, `source` is `null`. When the final routing
+decision has no diagnostic (for example, an explicit model or language override, or a hook
+replacement), `diagnostic` is `null`. The diagnostic comes from that routing call; it does not
+run detection again after a hook. `laya_route_batch` takes the same flag once for the whole
+batch, adds `diagnostic` to each decision, and preserves input order and `model_counts`.
+Omitted or `false` keeps each existing three-field decision.
+Only booleans are accepted: strings such as `"false"`, numbers, and `null` are rejected with an
+error naming `explain`. Direct Python helper calls report `invalid_explain`; MCP rejects them
+during argument validation. An injected router that rejects the requested `explain` keyword
+reports `unsupported_explain`, with no retry without the flag. Errors inside a router retain
+the existing internal-error path.
+
+The built-in detector's diagnostic contains no caller **values** or `mixed_segment` text. Its bounded
+`source.path` can contain caller-chosen field names; the existing routing `reason` can already
+contain an input segment. This is not a promise that the whole response is free of caller text.
+Even with `LAYA_BASE_URL`, it describes routing performed by the MCP process, not the HTTP
+server's actual prediction on a potentially different version or configuration. Shared-server
+routing uses no HTTP request or model. Ordinary local startup keeps its configured preload policy.
+
+For a local check of the MCP helpers without starting a server or loading checkpoints:
+
+```python
+from laya import Router
+from laya.mcp.tools import laya_route, laya_route_batch
+
+router = Router()
+request = {
+    "state": {"message": "Turn lights off"},
+    "questions": {"category": {"type": "choice", "instructions": "Classify the message.",
+                               "criteria": {"A": "Support", "B": "Other"}}},
+}
+single = laya_route(**request, explain=True, router=router)
+print(single["diagnostic"])
+# {'stage': 'whole_state', 'reason': 'insufficient_words', 'source': None}
+
+batch = laya_route_batch([request, dict(request, lang="en")], explain=True, router=router)
+assert batch["decisions"][0] == single
+assert batch["decisions"][1]["diagnostic"] is None  # explicit language bypasses detection
+assert batch["model_counts"] == {"multilingual": 1, "english": 1}
+assert not router.loaded
+```
 
 The three batch and schema tools exist because the same operations are available on the SDK and
 `laya-serve`: handling many requests, or serving a caller that already knows the answer shape,

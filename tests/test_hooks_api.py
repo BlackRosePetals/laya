@@ -282,6 +282,11 @@ for label, fn in (("analyse", analyse), ("Router.route", Router.route),
                   ("Router.route_batch", Router.route_batch)):
     check_param(label, fn, "explain", False, inspect.Parameter.KEYWORD_ONLY)
 check("latin_profile keeps its signature", list(sig(latin_profile)), ["text"])
+
+from laya.mcp.tools import laya_route, laya_route_batch  # noqa: E402
+
+check_param("laya_route", laya_route, "explain", False, inspect.Parameter.KEYWORD_ONLY)
+check_param("laya_route_batch", laya_route_batch, "explain", False, inspect.Parameter.KEYWORD_ONLY)
 _plain_analysis = analyse("Turn lights off")
 _explained_analysis = analyse("Turn lights off", explain=True)
 check("analyse opts into one extra key", set(_explained_analysis) - set(_plain_analysis), {"diagnostic"})

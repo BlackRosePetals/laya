@@ -3,6 +3,7 @@
 // LAYA_REQUIRE_GOLDENS=1 (the onnx lane) a missing one FAILS instead of skipping.
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cmath>

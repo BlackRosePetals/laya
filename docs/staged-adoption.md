@@ -78,6 +78,22 @@ owner with the policy. Re-evaluate it when those inputs change. Confidence order
 not establish that a decision is correct, and high confidence is never execution permission by
 itself.
 
+### Attacker-controlled context
+
+When a request includes text an attacker can influence, evaluate whether that text can steer the
+decision as well as whether the model is accurate on ordinary traffic. Keep paired cases with the
+same task and options: a clean state, then a version containing an instruction aimed at changing the
+answer. Include document-shaped and indirect instructions, and compare both the selected option and
+its confidence for each checkpoint and language you deploy. A confidence threshold fitted on clean
+data is not an injection detector; an attacker-steered answer can still be highly confident.
+
+The small probe reported in [#1229](https://github.com/NandhaKishorM/laya/issues/1229) found that
+confidence gating behaved differently across the English and multilingual checkpoints, and that the
+`guard` preset missed some document-shaped cases. Its eight requests per style establish a concrete
+failure mode, not a general attack rate or a reliable threshold. Use representative, reviewed cases
+from your own workflow, and keep high-impact actions behind an independent authorization or review
+boundary even when the decision and guard both pass.
+
 Four of those six come from the evaluation harness: a `laya-evals run --json` report records the
 checkpoint commit that answered (`config.revisions`), the dataset's bytes and question schema
 (`config.dataset_sha256`, `config.questions_sha256`) and the gate it was scored under
@@ -143,3 +159,4 @@ real request
 - [README: Automated Confidence Gating](https://github.com/NandhaKishorM/laya#automated-confidence-gating) — confidence is a
   policy input, not a correctness guarantee.
 - [README: Calibration](https://github.com/NandhaKishorM/laya#calibration) and [Honest limits](https://github.com/NandhaKishorM/laya#honest-limits).
+

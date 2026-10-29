@@ -78,6 +78,19 @@ owner with the policy. Re-evaluate it when those inputs change. Confidence order
 not establish that a decision is correct, and high confidence is never execution permission by
 itself.
 
+Four of those six come from the evaluation harness: a `laya-evals run --json` report records the
+checkpoint commit that answered (`config.revisions`), the dataset's bytes and question schema
+(`config.dataset_sha256`, `config.questions_sha256`) and the gate it was scored under
+(`config.thresholds`). A checkpoint given as a local directory has no commit to name, so its entry in
+that block is `null`. Calibration method and owner are the application's to record. See
+[Evaluation harness](evals.md) for the run identity and the comparability check between a baseline
+and a candidate.
+
+The README's [Automated Confidence Gating](https://github.com/NandhaKishorM/laya#automated-confidence-gating),
+[Calibration](https://github.com/NandhaKishorM/laya#calibration), and [Honest limits](https://github.com/NandhaKishorM/laya#honest-limits) sections
+give the existing calibration and confidence context. Keep irreversible or high-cost actions behind
+an explicit review boundary even when their confidence is high.
+
 ### Attacker-controlled context
 
 When a request includes text an attacker can influence, evaluate whether that text can steer the
@@ -93,19 +106,6 @@ confidence gating behaved differently across the English and multilingual checkp
 failure mode, not a general attack rate or a reliable threshold. Use representative, reviewed cases
 from your own workflow, and keep high-impact actions behind an independent authorization or review
 boundary even when the decision and guard both pass.
-
-Four of those six come from the evaluation harness: a `laya-evals run --json` report records the
-checkpoint commit that answered (`config.revisions`), the dataset's bytes and question schema
-(`config.dataset_sha256`, `config.questions_sha256`) and the gate it was scored under
-(`config.thresholds`). A checkpoint given as a local directory has no commit to name, so its entry in
-that block is `null`. Calibration method and owner are the application's to record. See
-[Evaluation harness](evals.md) for the run identity and the comparability check between a baseline
-and a candidate.
-
-The README's [Automated Confidence Gating](https://github.com/NandhaKishorM/laya#automated-confidence-gating),
-[Calibration](https://github.com/NandhaKishorM/laya#calibration), and [Honest limits](https://github.com/NandhaKishorM/laya#honest-limits) sections
-give the existing calibration and confidence context. Keep irreversible or high-cost actions behind
-an explicit review boundary even when their confidence is high.
 
 ## 4. Promote a bounded slice
 

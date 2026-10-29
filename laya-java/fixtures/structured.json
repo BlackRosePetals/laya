@@ -3229,6 +3229,30 @@
       "error": "properties.x: unsupported schema {'anyOf': {'a': 1}, 'oneOf': [{'type': 'boolean'}, {'type': 'null'}]}"
     },
     {
+      "case": "truthy-non-array-anyof-number",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "x": {
+            "anyOf": 5
+          }
+        }
+      },
+      "error": "properties.x: unsupported schema {'anyOf': 5}"
+    },
+    {
+      "case": "truthy-non-array-oneof-boolean",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "x": {
+            "oneOf": true
+          }
+        }
+      },
+      "error": "properties.x: unsupported schema {'oneOf': True}"
+    },
+    {
       "case": "top-level-is-null",
       "schema": null,
       "error": "expected a JSON schema object, got NoneType"

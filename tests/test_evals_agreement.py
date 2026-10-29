@@ -513,6 +513,25 @@ def test_cli_saved_run_replay_matches_public_api(tmp_path):
     assert json.loads(output.read_text(encoding="utf-8")) == expected
 
 
+def test_cli_reads_bom_prefixed_saved_runs(tmp_path):
+    """A run re-saved through an editor or a spreadsheet export is the same run with three bytes in front.
+
+    The three agreement reads opened `utf-8`, so a UTF-8 BOM stayed as U+FEFF and `json.load` refused
+    a document that is valid JSON, answering `cannot read agreement run ... Unexpected UTF-8 BOM
+    (decode using utf-8-sig)` -- a refusal naming the decoding this CLI could have asked for itself.
+    `laya/cli.py`, `laya/train.py` and `laya/evidence.py` open a caller's file with `utf-8-sig` for
+    exactly this reason, and the byte-for-byte equality below is the point: the BOM changes nothing
+    about the numbers, so it must change nothing about the verdict.
+    """
+    paths, runs = saved_runs(tmp_path)
+    for path in paths:
+        path.write_text("﻿" + path.read_text(encoding="utf-8"), encoding="utf-8")
+    expected = compare(runs, bootstrap_samples=100, seed=12)
+    result = cli(*paths, "--bootstrap-samples", "100", "--seed", "12")
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == expected
+
+
 @pytest.mark.parametrize("invalid", ["duplicate_key", "nan", "malformed", "nested", "missing", "misaligned"])
 def test_cli_refuses_bad_inputs_without_a_report(tmp_path, invalid):
     paths, runs = saved_runs(tmp_path)

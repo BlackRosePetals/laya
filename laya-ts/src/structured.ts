@@ -272,11 +272,33 @@ export function questionsFromJsonSchema(schema: unknown): Record<string, Questio
   return Object.fromEntries(planFromJsonSchema(schema).map((f) => [f.name, f.question]));
 }
 
-function project(answers: Record<string, Record<string, any> | undefined>, fields: PlannedField[]): Record<string, unknown> {
+/**
+ * Is this entry an answer object? Python's `_project` and `_details` ask the same question with
+ * `isinstance(answer, dict)` and skip the field when it is not true (structured.py:281, :323).
+ * Answers reach this port as parsed remote JSON, so the value under a field name can be a string,
+ * a number, a boolean or an array -- and `answer.low_confidence` on any of those is `undefined`
+ * rather than an error, so the unguarded read below did not crash: it invented a value. Measured
+ * with the other three answers well-formed and one replaced, against `laya/structured.py`:
+ *
+ *     answer      py (all fields)   ts (before)
+ *     "oops"      omitted           "undefined" (choice) / 0 (score) / false (noul)
+ *     ["x"]       omitted           same
+ *     7           omitted           same
+ *     true        omitted           same
+ *     null        omitted           omitted
+ *
+ * `Array.isArray` is load-bearing: `typeof` reports an array as "object", and `common.ts:408` --
+ * the port of the same skip -- has the primitive half of the check but not that one.
+ */
+function isAnswerObject(answer: unknown): answer is Record<string, any> {
+  return answer !== null && typeof answer === "object" && !Array.isArray(answer);
+}
+
+function project(answers: Record<string, unknown>, fields: PlannedField[]): Record<string, unknown> {
   const values: Record<string, unknown> = {};
   for (const f of fields) {
     const answer = answers[f.name];
-    if (answer == null) continue;
+    if (!isAnswerObject(answer)) continue;
     if (answer.low_confidence) {
       values[f.name] = null;
       continue;
@@ -312,7 +334,7 @@ function project(answers: Record<string, Record<string, any> | undefined>, field
 
 /** Project Laya answers onto the schema values (choice value, integer level, boolean). */
 export function answersToJson(
-  answers: Record<string, Record<string, any> | undefined>,
+  answers: Record<string, unknown>,
   schema: unknown,
 ): Record<string, unknown> {
   return project(answers, planFromJsonSchema(schema));
@@ -329,14 +351,16 @@ function answerConfidenceValue(answer: Record<string, any>): number | null {
 
 function detailsOf(
   values: Record<string, unknown>,
-  answers: Record<string, Record<string, any> | undefined>,
+  answers: Record<string, unknown>,
   result: { usage?: unknown; routing?: unknown },
 ): DecisionResult {
   const confidence: Record<string, number> = {};
   const answerConfidence: Record<string, number | null> = {};
   const probabilities: Record<string, Record<string, unknown>> = {};
   for (const [name, answer] of Object.entries(answers)) {
-    if (answer == null) continue;
+    // Same rule as `project`: a non-object answer reports no confidence, no max(p) and no
+    // probability map, rather than a 0.0/null/{} entry for a question that was never answered.
+    if (!isAnswerObject(answer)) continue;
     confidence[name] = Number(answer.confidence ?? 0.0);
     answerConfidence[name] = answerConfidenceValue(answer);
     if (answer.type === "noul") {

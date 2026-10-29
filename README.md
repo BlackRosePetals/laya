@@ -94,30 +94,26 @@ The shipped checkpoints work zero-shot, but fine-tuning on decisions from your o
 
 **[nandhakishorm.github.io/laya](https://nandhakishorm.github.io/laya/)**: guides for [prediction hooks](https://nandhakishorm.github.io/laya/hooks/), [schema-driven decisions](https://nandhakishorm.github.io/laya/structured/), [Docker](https://nandhakishorm.github.io/laya/docker/) and [LangChain and LangGraph](https://nandhakishorm.github.io/laya/langchain/), plus a full [API reference](https://nandhakishorm.github.io/laya/reference/).
 
-## What's new in 0.4.17
+## What's new in 0.4.18
 
-* **Vietnamese stops routing to the English checkpoint.** Its tone-marked vowels now count as
-  non-English diacritics. "Cảm ơn bạn nhiều nhé" scored a diacritic rate of 0.0 and read as
-  English. Fixed in `laya/lang.py` and carried into all six ports: TypeScript, Rust and .NET
-  directly, and the Java, Go and C++ tables re-recorded from the same source (#1392).
-* **A deciding window keeps its attribution after end hooks.** `predict_long` attributed answers
-  by position, so an end hook that reordered results reported the wrong token span without
-  saying so (#1369).
-* **`RemoteRouter` identifies itself, and the User-Agent is configurable.** The urllib default was
-  rejected outright by a Cloudflare browser-integrity rule in front of a hosted `laya-serve`,
-  before authentication (#1396).
-* **Ten more inputs are refused where they enter.** A `--questions` path that is a directory, a
-  UTF-8 BOM written by Notepad or Excel, a probability too wide for a double, an incomparable
-  `target_error`, a tool `choice` sent as an array, a short batch reply, an agent with no
-  tokenizer, a drive-anchored digest path and a bad `LAYA_MAX_LOADED` are each a named error
-  rather than a crash or a silent wrong answer (#1372, #1394, #1397, #1398, #1400, #1401, #1403,
-  #1404, #1405, #1406). A SHA-256 pin that is not a map is refused instead of verifying nothing
-  (#1402).
-* **The ports gain per-language temperatures, calibration files and a Go router.** `.NET` and Rust
-  take `lang_temperatures` plus per-call `lang`, `max_len` and `head_max_len` (#1370, #1371) and
-  .NET reads calibration files (#1384); Go gains the router model lifecycle, per-checkpoint
-  SHA-256 pins and routed inference (#1374, #1379). A C++ foundation starts, generated from the
-  same tables as Go (#1399, #1407).
+* **A C++ ONNX Runtime backend.** `laya_onnx` runs both shipped checkpoints on real graphs, with
+  goldens recorded by Python's `ONNXAgent` and the runtime pinned by sha256 in
+  `laya-cpp/cmake/onnxruntime.cmake`, verified at the moment it is fetched. The whole suite also
+  runs once under ThreadSanitizer (#1420).
+* **MCP route tools can explain a decision.** `laya_route` and `laya_route_batch` take
+  `explain: true` and return the final decision's `diagnostic`, and only that: the full detection
+  mapping is not exposed, because it copies caller text verbatim. `laya_predict` is unchanged
+  (#1409). Four MCP failures that a client could not act on are now named errors, including a
+  question `type` sent as an array, which crashed on an unhashable lookup (#1410).
+* **Eight more inputs are refused where they enter.** An `anyOf` or `oneOf` that is not an array,
+  an empty or over-long `[repo, subfolder]` pair, a JSON integer too wide for a double, a
+  `LAYA_SHA256_DIGESTS` nested past the JSON reader's depth, a delegation choice naming no agent,
+  and a non-object answer are each a named refusal rather than an `IndexError`, an `OverflowError`,
+  a `RecursionError` or a silently wrong answer. A negative agent index no longer wraps to the
+  last agent (#1364, #1412, #1413, #1414, #1416, #1417, #1418). A dataset or report saved with a
+  BOM is read instead of refused (#1415).
+* **Staged adoption covers attacker-controlled context.** A confidence threshold fitted on clean
+  data is not an injection detector (#1419).
 
 Earlier releases are in the [GitHub releases](https://github.com/NandhaKishorM/laya/releases).
 

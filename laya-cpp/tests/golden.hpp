@@ -4,6 +4,7 @@
 // With LAYA_REQUIRE_GOLDENS=1 (CI) a missing golden is a test FAILURE, never a skip.
 #include <gtest/gtest.h>
 
+#include <clocale>
 #include <cstdlib>
 #include <fstream>
 #include <map>
@@ -93,5 +94,27 @@ inline uint64_t BitsOf(const Value& v) {
 inline double Num(const Value& v) {
   return v.kind() == Value::Kind::Int ? double(v.as_int()) : v.as_float();
 }
+
+// Switches the process to a comma-decimal locale for a scope; ok() is false when none is installed.
+class CommaLocale {
+ public:
+  CommaLocale() : saved_(std::setlocale(LC_ALL, nullptr)) {
+    for (const char* c : {"de_DE.UTF-8", "de_DE.utf8", "fr_FR.UTF-8", "fr_FR.utf8", "de_DE", "de_DE.ISO8859-1"}) {
+      if (std::setlocale(LC_ALL, c) != nullptr && *std::localeconv()->decimal_point == ',') {
+        ok_ = true;
+        return;
+      }
+    }
+    std::setlocale(LC_ALL, saved_.c_str());
+  }
+  ~CommaLocale() { std::setlocale(LC_ALL, saved_.c_str()); }
+  CommaLocale(const CommaLocale&) = delete;
+  CommaLocale& operator=(const CommaLocale&) = delete;
+  bool ok() const { return ok_; }
+
+ private:
+  std::string saved_;
+  bool ok_ = false;
+};
 
 }  // namespace laya_test

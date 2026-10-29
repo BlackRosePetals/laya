@@ -1,6 +1,7 @@
 // Holds a Session and an Agent in statics, as a user program may, then exits normally. Exit code 0
 // means static destruction did not fault. argv: graph checkpoint_dir [close].
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <thread>
@@ -21,6 +22,7 @@ int main(int argc, char** argv) {
     return 2;
   }
   g_session = std::move(s).value();
+  if (std::getenv("ORT_DISABLE_TELEMETRY") == nullptr) return 7;  // Open must opt out first
   auto a = laya::agent::OpenOnnx(argv[2], argv[1]);
   if (!a.ok()) {
     std::fprintf(stderr, "agent: %s\n", a.error().c_str());

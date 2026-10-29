@@ -7,15 +7,21 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <limits>
 #include <map>
 #include <mutex>
+#include <set>
+#include <string>
 #include <thread>
+#include <vector>
 
 #include <sys/wait.h>
 #include <unistd.h>
+
+extern char** environ;
 
 #include "golden.hpp"
 #include "laya/onnx.hpp"
@@ -781,13 +787,25 @@ TEST_P(OnnxRig, CloseReturnsPromptlyUnderSustainedRunTraffic) {
 TEST_P(OnnxRig, AStaticSessionAndAgentExitCleanly) {
   const Rig& rig = kRigs[GetParam()];
   NEED_RIG(rig, graph, dir);
+  // The child gets no variable that turns the runtime's telemetry off, so it exits with the uploader
+  // thread running unless Open opts out (the abort this test guards against).
+  const std::set<std::string> drop = {"ORT_DISABLE_TELEMETRY", "ORT_RUNNING_UNIT_TESTS", "CI", "TF_BUILD",
+                                      "GITHUB_ACTIONS", "GITLAB_CI", "CIRCLECI", "TRAVIS", "JENKINS_URL",
+                                      "CODEBUILD_BUILD_ID", "BUILDKITE", "TEAMCITY_VERSION", "APPVEYOR",
+                                      "BITBUCKET_BUILD_NUMBER", "SYSTEM_TEAMFOUNDATIONCOLLECTIONURI"};
+  std::vector<const char*> envp;
+  for (char** e = environ; *e != nullptr; e++) {
+    const char* eq = std::strchr(*e, '=');
+    if (eq == nullptr || drop.count(std::string(*e, eq - *e)) == 0) envp.push_back(*e);
+  }
+  envp.push_back(nullptr);
   for (const char* mode : {"", "close"}) {
     const pid_t pid = fork();
     ASSERT_GE(pid, 0);
     if (pid == 0) {
       const char* argv[] = {LAYA_STATIC_HOLDER, graph.c_str(), dir.c_str(), mode, nullptr};
       if (*mode == 0) argv[3] = nullptr;
-      execv(LAYA_STATIC_HOLDER, const_cast<char* const*>(argv));
+      execve(LAYA_STATIC_HOLDER, const_cast<char* const*>(argv), const_cast<char* const*>(envp.data()));
       _exit(127);
     }
     int status = 0;

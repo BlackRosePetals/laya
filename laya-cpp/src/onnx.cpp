@@ -6,6 +6,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdlib>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -17,14 +18,23 @@ namespace laya {
 namespace onnx {
 namespace {
 
-// One Ort::Env per process, a function-local static. It is built on the first Open, after the
-// runtime's own statics, so it is destroyed before them: leaking it instead (tried first) leaves a
-// live OrtEnv while the runtime's statics die and aborts at exit ("recursive_mutex lock failed",
-// 5 of 6 TSan runs of CloseInterruptsARunInFlight/english, 0 of 4 with this static). A Session or
-// Agent a user holds in a static is destroyed after it, which the static-holder test pins. The
-// logging level is FATAL so a refused run is reported only through its Result.
+// ONNX Runtime 1.30 on POSIX starts a telemetry uploader thread with its first OrtEnv unless
+// ORT_DISABLE_TELEMETRY is truthy then. At exit that thread can lock a mutex the runtime's statics
+// already destroyed, which aborts the process ("recursive_mutex lock failed"). The variable is set
+// before our Env is built; a value the user already set wins.
+bool DisableRuntimeTelemetry() {
+#ifndef _WIN32
+  setenv("ORT_DISABLE_TELEMETRY", "1", 0);
+#endif
+  return true;
+}
+
+// One Ort::Env per process, built on the first Open. The logging level is FATAL so a refused run is
+// reported only through its Result.
 Ort::Env& SharedEnv() {
+  static const bool telemetry_off = DisableRuntimeTelemetry();
   static Ort::Env env(ORT_LOGGING_LEVEL_FATAL, "laya");
+  (void)telemetry_off;
   return env;
 }
 

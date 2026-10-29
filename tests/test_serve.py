@@ -4215,6 +4215,18 @@ def test_extra_models_option_refuses_a_malformed_value(monkeypatch):
     assert "invalid LAYA_EXTRA_MODELS" in message
     assert "'my-ckpt'" in message, message
 
+    # A list was believed on its type alone, so `[]` reached the Router and became
+    # `ValueError: not enough values to unpack` on the first request routed to it,
+    # and `["a", "b", "c"]` or `["a", 5]` became the wrong repo id in silence. Same
+    # refusal, same naming, at startup.
+    for bad in ([], ["a", "b", "c"], ["a", 5], [None, None]):
+        monkeypatch.setenv("LAYA_EXTRA_MODELS", json.dumps({"my-ckpt": bad}))
+        with pytest.raises(SystemExit) as raised:
+            _extra_models_option()
+        message = str(raised.value)
+        assert "invalid LAYA_EXTRA_MODELS" in message, (bad, message)
+        assert "'my-ckpt'" in message, (bad, message)
+
 
 def test_extra_models_reach_the_router_the_server_builds(monkeypatch):
     # Registration happens before preload, so the names resolve on the Router

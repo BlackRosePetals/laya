@@ -733,6 +733,15 @@ def _extra_models_option() -> Dict[str, Any]:
     out = {}
     for name, source in data.items():
         if isinstance(source, list):
+            # `[]`, a third element and a number are all lists, so they reached the Router and became
+            # `ValueError: not enough values to unpack` on the first request that routed to them (or a
+            # repo id like `acme/5`), long after the operator was told the value parsed. This option
+            # is the one place that still knows the name and can refuse the startup.
+            if (not 1 <= len(source) <= 2
+                    or not all(part is None or isinstance(part, str) for part in source)
+                    or not any(isinstance(part, str) for part in source)):
+                raise SystemExit("invalid LAYA_EXTRA_MODELS: source for %r must be a repo "
+                                 "id, a local path, or a [repo, subfolder] pair; got %r" % (name, source))
             out[name] = tuple(source)          # JSON has no tuple: [repo, subfolder]
         elif isinstance(source, str):
             out[name] = source

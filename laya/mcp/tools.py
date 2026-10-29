@@ -145,7 +145,7 @@ def validate_questions(questions: Any) -> dict:
         if not isinstance(spec, dict):
             raise ToolError("invalid_questions", f"questions[{name}] must be an object")
         qtype = spec.get("type")
-        if qtype not in VALID_TYPES:
+        if not isinstance(qtype, str) or qtype not in VALID_TYPES:
             raise ToolError(
                 "invalid_questions",
                 f"questions[{name}].type must be one of {sorted(VALID_TYPES)}, got {qtype!r}",
@@ -1022,6 +1022,14 @@ def laya_predict_long(
     Each answer carries the deciding window's ``window`` attribution (index and token offsets
     into the tokenized state), and ``windows`` counts the windows the model scored.
     """
+    if router is not None and agent is None and hasattr(router, "base_url") and hasattr(router, "health"):
+        raise ToolError(
+            "unsupported_remote",
+            "laya_predict_long scans the state window by window in-process; laya-serve has no "
+            "long-state endpoint, so it is not available when LAYA_BASE_URL points at laya-serve. "
+            "Run the MCP server without LAYA_BASE_URL to scan locally, or use laya_predict, which "
+            "answers from the first window only.",
+        )
     state_d = validate_state(state)
     questions_d = validate_questions(questions)
     model_name = validate_model(model)
@@ -1290,6 +1298,13 @@ def _validate_batch_item(request: Any, i: int) -> dict:
     for key in ("task", "lang"):
         if key in request:
             item[key] = _validate_batch_str(request[key], "%s[%r]" % (where, key))
+    # The router reads `task` only when no model is pinned, so that is when a name nothing answers
+    # to must be refused here: past this point it is a ValueError and the client sees internal_error.
+    if "task" in item and "model" not in item:
+        try:
+            validate_task(item["task"])
+        except ToolError as error:
+            raise ToolError("invalid_task", "%s['task']: %s" % (where, error)) from None
     if "lang_guess" in request:
         # Type-check it the way the single-request path does (`validate_lang_guess`), instead of
         # passing it through raw: a non-string (e.g. a JSON object) otherwise reached

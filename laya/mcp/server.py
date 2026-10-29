@@ -508,7 +508,7 @@ def laya_tournament_tool(
     min_confidence: float | None = None,
 ) -> str:
     """Answer many-option choices with balanced tournament rounds."""
-    router = _ensure_router()
+    router = _router_or_error()
     return _wrap(
         laya_tournament,
         state=state,

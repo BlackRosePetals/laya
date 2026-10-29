@@ -1616,6 +1616,51 @@ def test_route_batch_tool_hooks_timeout_forwarding():
                       "invalid_hooks_timeout")
 
 
+def test_batch_unknown_task_is_invalid_task():
+    """An unpinned batch `task` that names no checkpoint is `invalid_task`, as on `laya_route`.
+
+    The batch validator only checked that `task` was a non-empty string, so the name reached
+    `Router.route_batch` / `predict_batch`, whose `normalise_name` raised ValueError, and the
+    client got `internal_error`. A pinned model is never routed, so its task is left as it was
+    (`batch/validation_keeps_overrides`); "auto" pins nothing, so its task is checked.
+    """
+    import json
+
+    from laya.mcp import server as server_mod
+    from mcp.server.mcpserver.exceptions import ToolError as McpToolError
+
+    requests = [{"state": STATE, "questions": QUESTIONS},
+                {"state": STATE, "questions": QUESTIONS, "task": "not-a-checkpoint"}]
+    saved = server_mod._ROUTER
+    try:
+        for tool in ("laya_route_batch", "laya_predict_batch"):
+            router = BatchRouter()
+            server_mod._ROUTER = router
+            try:
+                result = asyncio.run(mcp_server.call_tool(tool, {"requests": requests}))
+            except McpToolError as exc:
+                # "Error executing tool <name>: <the wrapper's JSON payload>"
+                payload = json.loads(str(exc).split(": ", 1)[1])
+            else:
+                payload = {"answered": result.content[0].text}
+            ok("batch_task/%s_invalid_task" % tool, payload.get("error") == "invalid_task",
+               repr(payload)[:200])
+            ok("batch_task/%s_names_item" % tool,
+               "requests[1]['task']" in str(payload.get("message")), repr(payload)[:200])
+            ok("batch_task/%s_router_not_called" % tool,
+               router.route_batch_calls == [] and router.predict_batch_calls == [])
+    finally:
+        server_mod._ROUTER = saved
+
+    expect_tool_error("batch_task/auto_model_still_checks_task",
+                      lambda: validate_batch_requests(
+                          [{"state": STATE, "questions": QUESTIONS, "model": "auto",
+                            "task": "not-a-checkpoint"}]),
+                      "invalid_task")
+    out = validate_batch_requests([{"state": STATE, "questions": QUESTIONS, "task": "typed_decisions"}])
+    ok("batch_task/known_task_kept_as_spelled", out[0].get("task") == "typed_decisions", repr(out[0]))
+
+
 # --- decide tool (mocked router, no weights) ----------------------------------
 
 DECIDE_SCHEMA = {
@@ -2778,6 +2823,10 @@ def test_question_validation_matches_the_agent():
          {"type": "noul", "instructions": "is true?", "option_order": "10"}),
         ("option_order_null",
          {"type": "noul", "instructions": "is true?", "option_order": None}),
+        # A JSON array or object as the type is unhashable, so testing it against the set of
+        # types raised TypeError instead of naming the question.
+        ("type_list", {"type": [], "instructions": "is true?"}),
+        ("type_object", {"type": {}, "instructions": "is true?"}),
     ]
     for label, qdef in parity:
         ok("question_parity/core_rejects_%s" % label, core_rejects("q", qdef))
@@ -2852,6 +2901,8 @@ def test_a_bad_question_is_a_caller_error_not_a_server_fault():
                               "criteria": ["fine", None]}),
         ("option_order_repeat", {"type": "noul", "instructions": "is true?",
                                  "option_order": [0, 0]}),
+        ("type_list", {"type": [], "instructions": "is true?"}),
+        ("type_object", {"type": {}, "instructions": "is true?"}),
     ):
         try:
             server_mod._wrap(server_mod.laya_predict, state=STATE, questions={"q": qdef},
@@ -3237,6 +3288,46 @@ def test_server_tournament():
         server_mod._ROUTER = saved
 
 
+def test_server_router_construction_error_is_the_same_on_every_tool():
+    """A router that cannot be built reaches the client as the same JSON on every tool.
+
+    `_router_or_error` turns `_ensure_router`'s ToolError into the payload the wrapper sends; the
+    tournament tool called `_ensure_router` bare, so a bad LAYA_BASE_URL escaped as a raw ToolError
+    and MCP redacted it to "Error executing tool laya_tournament", with no code and no reason.
+    """
+    import json
+
+    from laya.mcp import server as server_mod
+    from mcp.server.mcpserver.exceptions import ToolError as McpToolError
+
+    saved_router, saved_url = server_mod._ROUTER, os.environ.get("LAYA_BASE_URL")
+    os.environ["LAYA_BASE_URL"] = "http://"
+    server_mod._ROUTER = None
+    try:
+        for tool in ("laya_predict", "laya_tournament"):
+            try:
+                asyncio.run(mcp_server.call_tool(tool, {"state": STATE, "questions": tournament_questions(4)}))
+            except McpToolError as exc:
+                # "Error executing tool <name>: <the wrapper's JSON payload>"
+                _, _, raw = str(exc).partition(": ")
+            else:
+                raw = ""
+            try:
+                payload = json.loads(raw)
+            except ValueError:
+                payload = {"raw": raw}
+            ok("server/construction_error_%s_code" % tool, payload.get("error") == "internal_error",
+               repr(payload))
+            ok("server/construction_error_%s_reason" % tool,
+               "remote router construction failed" in str(payload.get("message")), repr(payload))
+    finally:
+        server_mod._ROUTER = saved_router
+        if saved_url is None:
+            os.environ.pop("LAYA_BASE_URL", None)
+        else:
+            os.environ["LAYA_BASE_URL"] = saved_url
+
+
 def test_server_shortlist_k_default():
     """The shortlist tool's advertised `k` default must be `laya.shortlist`'s.
 
@@ -3417,6 +3508,7 @@ test_batch_predict()
 test_batch_tool_control_forwarding()
 test_batch_route()
 test_route_batch_tool_hooks_timeout_forwarding()
+test_batch_unknown_task_is_invalid_task()
 test_decide()
 test_shortlist_lang_parity()
 test_shortlist_embed_cache()
@@ -3439,6 +3531,7 @@ test_auto_task_env()
 test_default_model_env()
 test_server_registration()
 test_server_tournament()
+test_server_router_construction_error_is_the_same_on_every_tool()
 test_server_shortlist_k_default()
 test_cli_mcp_page_tool_argument_rows()
 

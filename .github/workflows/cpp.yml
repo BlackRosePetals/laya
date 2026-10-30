@@ -225,15 +225,28 @@ jobs:
         env:
           LAYA_ONNX_GRAPH: ${{ env.ONNX_ROOT }}/multilingual/laya.onnx
           LAYA_ONNX_GRAPH_ENGLISH: ${{ env.ONNX_ROOT }}/english/laya.onnx
-          # The ONNX Runtime this links is a prebuilt binary, so TSan cannot see the
-          # synchronization inside it and reads every buffer its thread pool returns as a race.
-          # laya-cpp/tsan-onnxruntime.supp records the measurement and what the suppression costs.
-          # Unused by the g++/debug and clang++/asan-ubsan cells, which link no TSan runtime to
-          # read it. An absolute path on purpose: TSan aborts the process with exit 134 on a
-          # suppressions file it cannot read, so a path relative to the wrong directory would take
-          # out every test rather than fail quietly. Inherited by laya_onnx_static_holder, whose
-          # exit status AStaticSessionAndAgentExitCleanly asserts and which TSan leaves at 66.
-          TSAN_OPTIONS: suppressions=${{ github.workspace }}/laya-cpp/tsan-onnxruntime.supp
+          # The ONNX Runtime this links is the prebuilt binary cmake/onnxruntime.cmake fetches,
+          # built without -fsanitize=thread. TSan cannot see the happens-before edges its mutexes
+          # and atomics establish, so it read every buffer that library's thread pool returned as
+          # a race: 342 reports, all with a libonnxruntime.so frame, all in memcpy or operator
+          # delete, failing 20 of 479 tests.
+          #
+          # This is the option built for that situation, and it is already the default on Darwin.
+          # A `called_from_lib:libonnxruntime.so` suppressions file was tried first and made it
+          # worse, 33 failures instead of 20: suppressing the library makes TSan ignore the locks
+          # it takes while still seeing the unlock that libstdc++ performs inside
+          # condition_variable::wait, which it then reports as unlocking a mutex nobody held, 151
+          # times. Ignoring the uninstrumented module keeps that bookkeeping consistent instead.
+          #
+          # What stays covered: a race between two laya threads on laya-owned state, in
+          # instrumented code, which is what OnnxRig.ConcurrentPredictAgreesWithASerialCall and
+          # CloseInterruptsARunInFlight exercise. Checked, not assumed: with this flag set, a
+          # deliberate race in instrumented code is still reported and still exits 134. What it
+          # gives up is any report whose access comes from inside an uninstrumented module, which
+          # TSan cannot adjudicate there anyway. Unused by the g++/debug and clang++/asan-ubsan
+          # cells, which link no TSan runtime. Inherited by laya_onnx_static_holder, whose exit
+          # status AStaticSessionAndAgentExitCleanly asserts and which TSan otherwise leaves at 66.
+          TSAN_OPTIONS: ignore_noninstrumented_modules=1
         run: ctest --preset "${{ matrix.preset }}" --output-junit "$RUNNER_TEMP/ctest-onnx.xml"
       - name: Count tests (fail on skip, enforce the onnx floor)
         if: ${{ !cancelled() }}

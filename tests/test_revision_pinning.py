@@ -25,6 +25,29 @@ from laya.revisions import (  # noqa: E402
 )
 from laya.router import Router, _digests_from_env, _merge_expected_digests  # noqa: E402
 
+# A JSON document nested deeper than the scanner's own stack, which `json` answers with a
+# `RecursionError` rather than a `ValueError`. The depth is read from the live recursion limit
+# rather than hardcoded, because the shape under test is "deeper than the scanner can go" and a
+# fixed depth stops being that shape the moment a host raises the limit.
+#
+# The *length* matters because the two tests below pass this value through `LAYA_SHA256_DIGESTS`.
+# A Windows environment variable cannot exceed 32 767 characters, so the 200 000-character literal
+# this replaces never reached `verify_digests` there: `patch.dict` itself raised
+# `ValueError: the environment variable is longer than 32767 characters`, failing the suite on
+# Windows while passing on Linux, which has no comparable per-variable limit.
+# `tests/test_serve.py` pins the same cap for pytest node ids. Files and request bodies have no
+# such limit, which is why the deep-nesting cases in the other suites keep their larger literals.
+_DEEP_JSON_DEPTH = sys.getrecursionlimit() + 100
+_DEEP_JSON = "[" * _DEEP_JSON_DEPTH + "]" * _DEEP_JSON_DEPTH
+
+# Checked on every platform, so the Windows-only failure above cannot come back unnoticed. An
+# explicit raise rather than `assert`, which `-O` would strip.
+if len(_DEEP_JSON) >= 32767:
+    raise AssertionError(
+        "_DEEP_JSON is %d characters, over the 32 767 a Windows environment variable holds"
+        % len(_DEEP_JSON)
+    )
+
 
 class _StopLoad(Exception):
     """Sentinel raised by the fake snapshot_download once kwargs are captured."""
@@ -180,7 +203,7 @@ class VerifyDigestsTests(unittest.TestCase):
         # traceback instead of the refusal this function's docstring names, which is what
         # `laya/_eval_policy.py`, `laya/evidence.py` and `laya/cli.py` already refuse to let a
         # caller's JSON do.
-        for bad in ("{not json", "[" * 100000 + "]" * 100000):
+        for bad in ("{not json", _DEEP_JSON):
             with self.subTest(value=bad[:20] + ("..." if len(bad) > 20 else "")):
                 with patch.dict(os.environ, {"LAYA_SHA256_DIGESTS": bad}):
                     with self.assertRaises(ValueError) as cm:
@@ -644,7 +667,7 @@ class RouterEnvDigestTests(unittest.TestCase):
         # nesting depth past its own stack with a `RecursionError`, a `RuntimeError`, so building a
         # Router on it crashed instead of naming nothing -- the one unparseable input this layer
         # promises to hand on rather than report.
-        for value in ("", "   ", "{not json", "[]", '"digests"', "{}", "[" * 100000 + "]" * 100000):
+        for value in ("", "   ", "{not json", "[]", '"digests"', "{}", _DEEP_JSON):
             with self._env(value):
                 self.assertEqual(Router().sha256_digests, {}, value)
 

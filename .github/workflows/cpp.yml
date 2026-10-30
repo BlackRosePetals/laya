@@ -225,6 +225,15 @@ jobs:
         env:
           LAYA_ONNX_GRAPH: ${{ env.ONNX_ROOT }}/multilingual/laya.onnx
           LAYA_ONNX_GRAPH_ENGLISH: ${{ env.ONNX_ROOT }}/english/laya.onnx
+          # The ONNX Runtime this links is a prebuilt binary, so TSan cannot see the
+          # synchronization inside it and reads every buffer its thread pool returns as a race.
+          # laya-cpp/tsan-onnxruntime.supp records the measurement and what the suppression costs.
+          # Unused by the g++/debug and clang++/asan-ubsan cells, which link no TSan runtime to
+          # read it. An absolute path on purpose: TSan aborts the process with exit 134 on a
+          # suppressions file it cannot read, so a path relative to the wrong directory would take
+          # out every test rather than fail quietly. Inherited by laya_onnx_static_holder, whose
+          # exit status AStaticSessionAndAgentExitCleanly asserts and which TSan leaves at 66.
+          TSAN_OPTIONS: suppressions=${{ github.workspace }}/laya-cpp/tsan-onnxruntime.supp
         run: ctest --preset "${{ matrix.preset }}" --output-junit "$RUNNER_TEMP/ctest-onnx.xml"
       - name: Count tests (fail on skip, enforce the onnx floor)
         if: ${{ !cancelled() }}
